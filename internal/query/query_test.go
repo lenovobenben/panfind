@@ -1,6 +1,7 @@
 package query
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -190,5 +191,62 @@ func TestModificationTimePredicates(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Path != "/recent" || results[1].Path != "/one-day" {
 		t.Fatalf("-newermt results = %+v", results)
+	}
+}
+
+func TestExecuteFromSubdirectoryUsesRelativeDepth(t *testing.T) {
+	root := namespace.NodeKey{Provider: "baidu-local", Account: "account-1", ID: 1}
+	directory := namespace.NodeKey{Provider: "baidu-local", Account: "account-1", ID: 2}
+	file := namespace.NodeKey{Provider: "baidu-local", Account: "account-1", ID: 3}
+	sibling := namespace.NodeKey{Provider: "baidu-local", Account: "account-1", ID: 4}
+	snapshot, err := namespace.NewSnapshot(1, root, []namespace.Node{
+		{Key: root, Name: "/", Kind: namespace.NodeKindDirectory},
+		{Key: directory, Parent: root, Name: "software", Kind: namespace.NodeKindDirectory},
+		{Key: file, Parent: directory, Name: "setup.exe", Kind: namespace.NodeKindFile},
+		{Key: sibling, Parent: root, Name: "outside.exe", Kind: namespace.NodeKindFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := Parse("baidu:/software", []string{"-mindepth", "1", "-maxdepth", "1", "-type", "f"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := Execute(snapshot, parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Path != "/software/setup.exe" {
+		t.Fatalf("Execute() = %+v", results)
+	}
+}
+
+func TestExecuteEachStreamsAndPropagatesVisitorError(t *testing.T) {
+	root := namespace.NodeKey{Provider: "baidu-local", Account: "account-1", ID: 1}
+	file := namespace.NodeKey{Provider: "baidu-local", Account: "account-1", ID: 2}
+	snapshot, err := namespace.NewSnapshot(1, root, []namespace.Node{
+		{Key: root, Name: "/", Kind: namespace.NodeKindDirectory},
+		{Key: file, Parent: root, Name: "file.bin", Kind: namespace.NodeKindFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse("baidu:/", []string{"-type", "f"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := fmt.Errorf("stop output")
+	visits := 0
+	err = ExecuteEach(snapshot, parsed, func(result Result) error {
+		visits++
+		if result.Path != "/file.bin" {
+			t.Fatalf("result path = %q", result.Path)
+		}
+		return want
+	})
+	if err != want || visits != 1 {
+		t.Fatalf("ExecuteEach() error = %v, visits = %d", err, visits)
 	}
 }

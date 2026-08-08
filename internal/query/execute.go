@@ -15,37 +15,75 @@ type Result struct {
 	Node namespace.Node
 }
 
+type ResultVisitor func(Result) error
+
 func Execute(snapshot *namespace.Snapshot, query Query) ([]Result, error) {
 	return ExecuteAt(snapshot, query, time.Now())
 }
 
 func ExecuteAt(snapshot *namespace.Snapshot, query Query, now time.Time) ([]Result, error) {
-	keys, err := snapshot.Walk(snapshot.Root())
-	if err != nil {
-		return nil, err
-	}
-
 	results := make([]Result, 0)
-	for _, key := range keys {
+	err := ExecuteEachAt(snapshot, query, now, func(result Result) error {
+		results = append(results, result)
+		return nil
+	})
+	return results, err
+}
+
+// ExecuteEach streams matching nodes to visit without retaining a result set.
+func ExecuteEach(snapshot *namespace.Snapshot, query Query, visit ResultVisitor) error {
+	return ExecuteEachAt(snapshot, query, time.Now(), visit)
+}
+
+func ExecuteEachAt(snapshot *namespace.Snapshot, query Query, now time.Time, visit ResultVisitor) error {
+	if visit == nil {
+		return fmt.Errorf("result visitor is nil")
+	}
+	providerPrefix, startPath, err := splitRoot(query.Root)
+	if err != nil {
+		return err
+	}
+	start, exists := snapshot.Lookup(startPath)
+	if !exists {
+		return fmt.Errorf("query root does not exist: %s", query.Root)
+	}
+	startDepth := pathDepth(startPath)
+
+	return snapshot.WalkEach(start, func(key namespace.NodeKey) error {
 		node, exists := snapshot.Node(key)
 		if !exists {
-			return nil, fmt.Errorf("snapshot node disappeared during query: %+v", key)
+			return fmt.Errorf("snapshot node disappeared during query: %+v", key)
 		}
 		nodePath, err := snapshot.Path(key)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		depth := pathDepth(nodePath)
+		depth := pathDepth(nodePath) - startDepth
 		if depth < query.MinDepth || query.MaxDepth != nil && depth > *query.MaxDepth {
-			continue
+			return nil
 		}
-		cloudPath := strings.TrimSuffix(query.Root, "/") + nodePath
+		cloudPath := providerPrefix + nodePath
 		if !matches(query.Expression, node, cloudPath, now) {
-			continue
+			return nil
 		}
-		results = append(results, Result{Path: nodePath, Node: node})
+		return visit(Result{Path: nodePath, Node: node})
+	})
+}
+
+func splitRoot(root string) (string, string, error) {
+	separator := strings.IndexByte(root, ':')
+	if separator <= 0 {
+		return "", "", fmt.Errorf("invalid query root %q", root)
 	}
-	return results, nil
+	prefix := root[:separator+1]
+	namespacePath := root[separator+1:]
+	if namespacePath == "" {
+		namespacePath = "/"
+	}
+	if !strings.HasPrefix(namespacePath, "/") || strings.ContainsRune(namespacePath, '\x00') {
+		return "", "", fmt.Errorf("invalid query root %q", root)
+	}
+	return prefix, path.Clean(namespacePath), nil
 }
 
 func matches(expression Expression, node namespace.Node, cloudPath string, now time.Time) bool {

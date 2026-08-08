@@ -219,13 +219,15 @@ go test ./...
 go vet ./...
 ```
 
+查询包包含 22 个与 GNU `find` 对照的固定差分案例。Windows 默认查找 Git for Windows 附带的 `find.exe`；也可以通过 `PANFIND_GNU_FIND` 指定 GNU findutils 可执行文件。环境中没有 GNU findutils 时，差分用例会明确跳过。
+
 运行基准：
 
 ```powershell
 go test -bench=. -benchmem ./internal/namespace ./internal/query
 ```
 
-项目已经使用真实的约 1.8 万节点百度缓存进行只读验证，并包含 10 万和 100 万节点合成基准。受控 SQLite 集成测试覆盖了 WAL 写入、增删改移、无效数据、排他锁、失败保留和恢复刷新。下一阶段主要工作是 GNU `find` 差分测试和 Windows 发布流程，不继续提前优化内存或引入增量同步。
+项目已经使用真实的约 1.8 万节点百度缓存进行只读验证，并包含 10 万和 100 万节点合成基准。受控 SQLite 集成测试覆盖了 WAL 写入、增删改移、无效数据、排他锁、失败保留和恢复刷新；GNU `find` 差分测试用于固定已承诺的查询语义。下一阶段主要工作是 Windows 自动构建和发布流程，不继续提前优化内存或引入增量同步。
 
 ## 许可证
 

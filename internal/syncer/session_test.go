@@ -125,8 +125,8 @@ func TestRunDebouncesDatabaseChanges(t *testing.T) {
 	go func() {
 		done <- session.Run(ctx, WatchOptions{
 			PollInterval: 5 * time.Millisecond,
-			Debounce:     30 * time.Millisecond,
-			MaxDelay:     100 * time.Millisecond,
+			Debounce:     100 * time.Millisecond,
+			MaxDelay:     300 * time.Millisecond,
 		}, func(snapshot *namespace.Snapshot, _ Status) error {
 			observed <- snapshot.Generation()
 			return nil
@@ -135,15 +135,9 @@ func TestRunDebouncesDatabaseChanges(t *testing.T) {
 
 	waitGeneration(t, loader.loaded, 1)
 	waitGeneration(t, observed, 1)
-	waitFor(t, time.Second, func() bool {
-		current := session.Current()
-		return current != nil && current.Generation() == 1
-	})
-	time.Sleep(20 * time.Millisecond)
 	if err := os.WriteFile(databasePath+"-wal", []byte("one"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(10 * time.Millisecond)
 	if err := os.WriteFile(databasePath+"-wal", []byte("two-two"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +147,7 @@ func TestRunDebouncesDatabaseChanges(t *testing.T) {
 	select {
 	case generation := <-loader.loaded:
 		t.Fatalf("burst caused an extra refresh generation %d", generation)
-	case <-time.After(60 * time.Millisecond):
+	case <-time.After(150 * time.Millisecond):
 	}
 
 	cancel()

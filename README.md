@@ -118,6 +118,7 @@ Skill 的 Windows 脚本负责安全调用 PanFind、解析 JSON Lines、汇总�
 - 支持单账号自动选择和多账号显式选择；
 - 使用 SQLite 只读事务加载一致的完整快照；
 - 提供路径查找、目录遍历、大小、修改时间、哈希和稳定节点标识；
+- JSON Lines 查询结果会在数据源提供时输出 `hash`，缺失时省略该字段；
 - 支持接近 GNU `find` 的组合查询、JSON Lines 和有限 `-printf`；
 - 提供机器可读的 `schema`、`capabilities` 和 `explain`；
 - 支持前台 `watch`，数据库变化后约一秒内构建并原子发布新快照；

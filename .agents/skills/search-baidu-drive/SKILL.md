@@ -32,6 +32,8 @@ Prefer the bundled Windows script for ordinary metadata queries because it handl
 
 The script emits one JSON object with `total`, `matched_size_bytes`, `matched_size_human`, `returned`, `truncated`, `query`, and `results`. `matched_size_bytes` covers the entire match set even when `results` is truncated. Calculate from byte values, not formatted strings.
 
+Each returned result preserves the provider hash as `hash` when available. Treat a missing `hash` as unavailable metadata, not as an empty or matching hash.
+
 Use direct PanFind commands when the helper cannot express a necessary supported query. Inspect `capabilities --json`, `schema --json`, and `explain ... --json` instead of guessing field availability or query syntax.
 
 ## Script parameters

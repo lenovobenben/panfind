@@ -62,11 +62,12 @@ func RunContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 }
 
 type queryResult struct {
-	Generation uint64 `json:"generation,omitempty"`
-	Path       string `json:"path"`
-	Type       string `json:"type"`
-	Size       uint64 `json:"size"`
-	ModifiedAt any    `json:"modified_at,omitempty"`
+	Generation uint64  `json:"generation,omitempty"`
+	Path       string  `json:"path"`
+	Type       string  `json:"type"`
+	Size       uint64  `json:"size"`
+	ModifiedAt any     `json:"modified_at,omitempty"`
+	Hash       *string `json:"hash,omitempty"`
 }
 
 type queryRequest struct {
@@ -193,6 +194,7 @@ func executeQuery(snapshot *namespace.Snapshot, request queryRequest, generation
 		if result.Node.ModifiedAt != nil {
 			item.ModifiedAt = result.Node.ModifiedAt
 		}
+		item.Hash = result.Node.Hash
 		if err := output.WriteJSONLine(stdout, item); err != nil {
 			writeErr = err
 			return err

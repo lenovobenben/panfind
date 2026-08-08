@@ -302,7 +302,7 @@ $results = @(
         $location = Get-BaiduLocation -Path $item.path -Type $item.type
         $sizeBytes = if ($item.PSObject.Properties['size']) { [long]$item.size } else { 0L }
         $modifiedAt = if ($item.PSObject.Properties['modified_at']) { $item.modified_at } else { $null }
-        [ordered]@{
+        $result = [ordered]@{
             name = $location.name
             type = $item.type
             size_bytes = $sizeBytes
@@ -313,6 +313,10 @@ $results = @(
             web_url = $location.web_url
             web_url_kind = 'experimental-directory-route'
         }
+        if ($item.PSObject.Properties['hash'] -and -not [string]::IsNullOrWhiteSpace([string]$item.hash)) {
+            $result.hash = [string]$item.hash
+        }
+        $result
     }
 )
 

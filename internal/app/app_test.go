@@ -138,9 +138,10 @@ func TestRunWatchRequiresRoot(t *testing.T) {
 func TestWatchJSONResultsIncludeGeneration(t *testing.T) {
 	root := namespace.NodeKey{Provider: "baidu-local", Account: "test", ID: 1}
 	file := namespace.NodeKey{Provider: root.Provider, Account: root.Account, ID: 2}
+	hash := "0123456789abcdef0123456789abcdef"
 	snapshot, err := namespace.NewSnapshot(7, root, []namespace.Node{
 		{Key: root, Name: "/", Kind: namespace.NodeKindDirectory},
-		{Key: file, Parent: root, Name: "movie.mkv", Kind: namespace.NodeKindFile, Size: 42},
+		{Key: file, Parent: root, Name: "movie.mkv", Kind: namespace.NodeKindFile, Size: 42, Hash: &hash},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -155,14 +156,43 @@ func TestWatchJSONResultsIncludeGeneration(t *testing.T) {
 		t.Fatalf("executeQuery() = %+v", result)
 	}
 	var item struct {
-		Generation uint64 `json:"generation"`
-		Path       string `json:"path"`
+		Generation uint64  `json:"generation"`
+		Path       string  `json:"path"`
+		Hash       *string `json:"hash"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &item); err != nil {
 		t.Fatal(err)
 	}
-	if item.Generation != 7 || item.Path != "baidu:/movie.mkv" {
+	if item.Generation != 7 || item.Path != "baidu:/movie.mkv" || item.Hash == nil || *item.Hash != hash {
 		t.Fatalf("watch result = %+v", item)
+	}
+}
+
+func TestJSONResultOmitsMissingHash(t *testing.T) {
+	root := namespace.NodeKey{Provider: "baidu-local", Account: "test", ID: 1}
+	file := namespace.NodeKey{Provider: root.Provider, Account: root.Account, ID: 2}
+	snapshot, err := namespace.NewSnapshot(1, root, []namespace.Node{
+		{Key: root, Name: "/", Kind: namespace.NodeKindDirectory},
+		{Key: file, Parent: root, Name: "movie.mkv", Kind: namespace.NodeKindFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := parseQueryRequest([]string{"baidu:/", "-type", "f", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	result := executeQuery(snapshot, request, 0, &stdout)
+	if result.err != nil || result.matched != 1 {
+		t.Fatalf("executeQuery() = %+v", result)
+	}
+	var item map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := item["hash"]; exists {
+		t.Fatalf("missing hash was emitted: %s", stdout.String())
 	}
 }
 

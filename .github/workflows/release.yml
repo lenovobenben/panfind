@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Test and publish Windows release
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate release tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tag must use vMAJOR.MINOR.PATCH: $env:GITHUB_REF_NAME"
+          }
+          "PANFIND_VERSION=$env:GITHUB_REF_NAME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Require GNU findutils
+        shell: pwsh
+        run: |
+          $gnuFind = 'C:\Program Files\Git\usr\bin\find.exe'
+          if (-not (Test-Path -LiteralPath $gnuFind)) {
+            throw "GNU findutils was not found at $gnuFind"
+          }
+          & $gnuFind --version
+          "PANFIND_GNU_FIND=$gnuFind" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Build and verify Windows executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $ldflags = "-s -w -X github.com/lenovobenben/panfind/internal/version.Version=$env:PANFIND_VERSION"
+          go build -trimpath -ldflags $ldflags -o dist/panfind-windows-amd64.exe ./cmd/panfind
+          $reportedVersion = & .\dist\panfind-windows-amd64.exe version
+          if ($reportedVersion -ne "panfind $env:PANFIND_VERSION") {
+            throw "Built executable reported an unexpected version: $reportedVersion"
+          }
+
+      - name: Write SHA-256 checksum
+        shell: pwsh
+        run: |
+          $asset = 'dist/panfind-windows-amd64.exe'
+          $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash *panfind-windows-amd64.exe" | Set-Content -LiteralPath dist/SHA256SUMS.txt -Encoding ascii
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            dist/panfind-windows-amd64.exe `
+            dist/SHA256SUMS.txt `
+            --repo $env:GITHUB_REPOSITORY `
+            --verify-tag `
+            --generate-notes `
+            --latest `
+            --title "PanFind $env:PANFIND_VERSION"

@@ -45,6 +45,28 @@ go build -trimpath -o bin/panfind.exe ./cmd/panfind
 
 项目使用纯 Go SQLite 驱动，构建不要求 CGO。
 
+## 下载正式版本
+
+私有仓库协作者可以从 [GitHub Releases](https://github.com/lenovobenben/panfind/releases) 下载：
+
+- `panfind-windows-amd64.exe`；
+- `SHA256SUMS.txt`。
+
+校验下载文件：
+
+```powershell
+$expected = (Get-Content .\SHA256SUMS.txt).Split()[0]
+$actual = (Get-FileHash .\panfind-windows-amd64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+$actual -eq $expected
+```
+
+输出 `True` 表示校验通过。正式构建会把 Git 标签注入版本信息，例如：
+
+```powershell
+.\panfind-windows-amd64.exe version
+# panfind v0.1.0
+```
+
 ## 快速开始
 
 查找大于 1 GiB 的文件：
@@ -208,7 +230,7 @@ PanFind 将用户文件名、路径、大小、哈希和时间视为敏感数据
 - 不提供可靠的创建时间或加入网盘时间；
 - `watch` 会重复输出每代完整结果，而不是输出差异；
 - 尚未承诺兼容 GNU `find` 未列出的选项和细节；
-- 尚未提供预编译 Release，当前需要从源码构建。
+- 正式 Release 当前只提供 Windows amd64 单文件版本。
 
 ## 开发和验证
 
@@ -229,7 +251,7 @@ go test -bench=. -benchmem ./internal/namespace ./internal/query
 
 私有仓库的 `Windows CI` 工作流会在 push、pull request 和手动触发时执行完整测试、`go vet`、GNU `find` 差分测试和单文件构建，并保留 Windows amd64 exe artifact 7 天。CI artifact 是开发构建，不等同于正式 Release。
 
-项目已经使用真实的约 1.8 万节点百度缓存进行只读验证，并包含 10 万和 100 万节点合成基准。受控 SQLite 集成测试覆盖了 WAL 写入、增删改移、无效数据、排他锁、失败保留和恢复刷新；GNU `find` 差分测试用于固定已承诺的查询语义。下一阶段主要工作是设置 `v0.1.0` 版本并建立正式 Release 流程，不继续提前优化内存或引入增量同步。
+项目已经使用真实的约 1.8 万节点百度缓存进行只读验证，并包含 10 万和 100 万节点合成基准。受控 SQLite 集成测试覆盖了 WAL 写入、增删改移、无效数据、排他锁、失败保留和恢复刷新；GNU `find` 差分测试用于固定已承诺的查询语义。正式 Release 工作流从 `vMAJOR.MINOR.PATCH` 标签构建、验证版本、生成 SHA-256 校验文件并发布资产。后续开发不继续提前优化内存或引入增量同步。
 
 ## 许可证
 

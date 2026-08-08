@@ -92,7 +92,15 @@ func TestSupportedQueriesMatchGNUFind(t *testing.T) {
 
 func locateGNUFind(t *testing.T) string {
 	t.Helper()
-	candidates := []string{os.Getenv("PANFIND_GNU_FIND")}
+	if configured := os.Getenv("PANFIND_GNU_FIND"); configured != "" {
+		output, err := exec.Command(configured, "--version").CombinedOutput()
+		if err != nil || !bytes.Contains(output, []byte("GNU findutils")) {
+			t.Fatalf("PANFIND_GNU_FIND=%q is not GNU findutils: %v: %s", configured, err, strings.TrimSpace(string(output)))
+		}
+		return configured
+	}
+
+	candidates := make([]string, 0, 3)
 	if runtime.GOOS == "windows" {
 		if programFiles := os.Getenv("ProgramFiles"); programFiles != "" {
 			candidates = append(candidates, filepath.Join(programFiles, "Git", "usr", "bin", "find.exe"))

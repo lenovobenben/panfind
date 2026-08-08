@@ -1,0 +1,55 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    name: Test and build Windows executable
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Require GNU findutils
+        shell: pwsh
+        run: |
+          $gnuFind = 'C:\Program Files\Git\usr\bin\find.exe'
+          if (-not (Test-Path -LiteralPath $gnuFind)) {
+            throw "GNU findutils was not found at $gnuFind"
+          }
+          & $gnuFind --version
+          "PANFIND_GNU_FIND=$gnuFind" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -trimpath -ldflags "-s -w" -o dist/panfind-windows-amd64.exe ./cmd/panfind
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: panfind-windows-amd64-${{ github.sha }}
+          path: dist/panfind-windows-amd64.exe
+          if-no-files-found: error
+          retention-days: 7

@@ -2,9 +2,13 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/lenovobenben/panfind/internal/namespace"
+	"github.com/lenovobenben/panfind/internal/provider"
 )
 
 func TestRunHelp(t *testing.T) {
@@ -119,6 +123,106 @@ func TestRunQueryRequiresRoot(t *testing.T) {
 	code := Run([]string{"query"}, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "missing query root") {
 		t.Fatalf("Run(query) = %d, stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRunWatchRequiresRoot(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"watch"}, &stdout, &stderr)
+	if code != ExitUsage || !strings.Contains(stderr.String(), "panfind watch: missing query root") {
+		t.Fatalf("Run(watch) = %d, stderr=%q", code, stderr.String())
+	}
+}
+
+func TestWatchJSONResultsIncludeGeneration(t *testing.T) {
+	root := namespace.NodeKey{Provider: "baidu-local", Account: "test", ID: 1}
+	file := namespace.NodeKey{Provider: root.Provider, Account: root.Account, ID: 2}
+	snapshot, err := namespace.NewSnapshot(7, root, []namespace.Node{
+		{Key: root, Name: "/", Kind: namespace.NodeKindDirectory},
+		{Key: file, Parent: root, Name: "movie.mkv", Kind: namespace.NodeKindFile, Size: 42},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := parseQueryRequest([]string{"baidu:/", "-type", "f", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	result := executeQuery(snapshot, request, snapshot.Generation(), &stdout)
+	if result.err != nil || result.matched != 1 {
+		t.Fatalf("executeQuery() = %+v", result)
+	}
+	var item struct {
+		Generation uint64 `json:"generation"`
+		Path       string `json:"path"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.Generation != 7 || item.Path != "baidu:/movie.mkv" {
+		t.Fatalf("watch result = %+v", item)
+	}
+}
+
+func TestParseQueryAccount(t *testing.T) {
+	request, err := parseQueryRequest([]string{"baidu:/", "--account", "second", "-type", "f", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.accountID == nil || *request.accountID != "second" || !request.jsonOutput {
+		t.Fatalf("parsed request = %+v", request)
+	}
+	if _, err := parseQueryRequest([]string{"baidu:/", "--account"}); err == nil {
+		t.Fatal("missing account ID was accepted")
+	}
+}
+
+type fakeAccountDiscoverer struct {
+	accounts []provider.Account
+	err      error
+}
+
+func (fake fakeAccountDiscoverer) DiscoverAccounts(context.Context) ([]provider.Account, error) {
+	return fake.accounts, fake.err
+}
+
+func TestDiscoverQueryAccount(t *testing.T) {
+	accounts := []provider.Account{
+		{Provider: "baidu-local", ID: "first"},
+		{Provider: "baidu-local", ID: "second"},
+	}
+	discoverer := fakeAccountDiscoverer{accounts: accounts}
+	if _, err := discoverQueryAccount(context.Background(), discoverer, nil); err == nil || !strings.Contains(err.Error(), "use --account") {
+		t.Fatalf("multiple account error = %v", err)
+	}
+	selected := namespace.AccountID("second")
+	account, err := discoverQueryAccount(context.Background(), discoverer, &selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ID != selected {
+		t.Fatalf("selected account = %q", account.ID)
+	}
+	missing := namespace.AccountID("missing")
+	if _, err := discoverQueryAccount(context.Background(), discoverer, &missing); err == nil || !strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("missing account error = %v", err)
+	}
+}
+
+func TestWriteAccountsJSON(t *testing.T) {
+	accounts := []provider.Account{{Provider: "baidu-local", ID: "account-1", DisplayName: "Account One"}}
+	var stdout bytes.Buffer
+	if err := writeAccounts(&stdout, accounts, true); err != nil {
+		t.Fatal(err)
+	}
+	var items []accountInfo
+	if err := json.Unmarshal(stdout.Bytes(), &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Account != "account-1" || items[0].DisplayName != "Account One" {
+		t.Fatalf("account list = %+v", items)
 	}
 }
 

@@ -147,6 +147,62 @@ func TestSnapshotWalkAndPath(t *testing.T) {
 	}
 }
 
+func TestSnapshotSupportsRootAfterItsChildrenInSource(t *testing.T) {
+	root := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 1}
+	file := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 2}
+	snapshot, err := NewSnapshot(1, root, []Node{
+		{Key: file, Parent: root, Name: "first-in-source", Kind: NodeKindFile},
+		{Key: root, Name: "/", Kind: NodeKindDirectory},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keys, err := snapshot.Walk(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 || keys[0] != root || keys[1] != file {
+		t.Fatalf("Walk() = %+v", keys)
+	}
+}
+
+func TestSnapshotPreservesUnicodeNames(t *testing.T) {
+	root := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 1}
+	directory := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 2}
+	file := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 3}
+	snapshot, err := NewSnapshot(1, root, []Node{
+		{Key: root, Name: "/", Kind: NodeKindDirectory},
+		{Key: directory, Parent: root, Name: "资料", Kind: NodeKindDirectory},
+		{Key: file, Parent: directory, Name: "文件.txt", Kind: NodeKindFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	node, exists := snapshot.Node(file)
+	filePath, pathErr := snapshot.Path(file)
+	lookedUp, found := snapshot.Lookup("/资料/文件.txt")
+	if !exists || pathErr != nil || node.Name != "文件.txt" || filePath != "/资料/文件.txt" || !found || lookedUp != file {
+		t.Fatalf("node = %+v, path = %q, pathErr = %v, lookup = %+v, found = %t", node, filePath, pathErr, lookedUp, found)
+	}
+}
+
+func TestSnapshotRejectsInvalidNonRootNames(t *testing.T) {
+	root := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 1}
+	for _, name := range []string{"", ".", "..", "a/b"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewSnapshot(1, root, []Node{
+				{Key: root, Name: "/", Kind: NodeKindDirectory},
+				{Key: NodeKey{Provider: root.Provider, Account: root.Account, ID: 2}, Parent: root, Name: name, Kind: NodeKindFile},
+			})
+			if err == nil {
+				t.Fatalf("NewSnapshot() accepted invalid name %q", name)
+			}
+		})
+	}
+}
+
 func TestSnapshotRejectsDuplicatePath(t *testing.T) {
 	root := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 1}
 	_, err := NewSnapshot(1, root, []Node{
@@ -156,6 +212,20 @@ func TestSnapshotRejectsDuplicatePath(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewSnapshot() accepted duplicate paths")
+	}
+}
+
+func TestSnapshotRejectsParentCycle(t *testing.T) {
+	root := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 1}
+	first := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 2}
+	second := NodeKey{Provider: "baidu-local", Account: "account-1", ID: 3}
+	_, err := NewSnapshot(1, root, []Node{
+		{Key: root, Name: "/", Kind: NodeKindDirectory},
+		{Key: first, Parent: second, Name: "first", Kind: NodeKindDirectory},
+		{Key: second, Parent: first, Name: "second", Kind: NodeKindDirectory},
+	})
+	if err == nil {
+		t.Fatal("NewSnapshot() accepted a parent cycle")
 	}
 }
 

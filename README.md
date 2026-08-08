@@ -1,34 +1,134 @@
 # PanFind（盘寻）
 
-PanFind 是一个面向云盘的 POSIX 风格文件元数据查询工具。它读取官方客户端保存在本机的文件元数据，将其构建为只读命名空间，并提供接近 GNU `find` 的组合查询能力。
+> 给 AI Agent 使用的多存储 POSIX 命名空间。
 
-当前版本是百度网盘 Windows 客户端的 MVP：只读取本地 `filecache.db`，不登录百度账号，不调用远端 API，也不执行上传、下载、删除、移动或重命名。
+PanFind 把网盘和其他存储中的文件元数据映射成统一、快速、可组合的 POSIX 风格命名空间。AI Agent 可以把它当作探索用户文件世界的基础设施：先获得完整文件树、路径、大小、时间和哈希等线索，再结合互联网知识、临时脚本、下载和内容分析工具，尝试完成用户提出的任意搜索目标。
 
-## 当前能力
+当前 `v0.1.0` 是百度网盘 Windows 客户端的只读 MVP。它直接读取官方客户端已经保存在本机的 `filecache.db`，不登录百度账号、不全量调用远端 API，也不执行上传、删除、移动或重命名。
+
+## 为什么需要 PanFind
+
+消费级网盘通常只提供名称搜索。AI Agent 如果想了解整个网盘，往往只能递归调用远端列表接口，或者自行研究某家客户端的内部数据库：前者缓慢且可能触发风控，后者会让每个 Agent 重复处理数据库位置、版本、锁、WAL 和字段差异。
+
+PanFind 把这些问题收敛到一个稳定中间层：
+
+```text
+百度本地数据库 ─┐
+夸克本地数据   ─┤
+其他网盘 API  ─┼─> Provider Adapter ─> POSIX 命名空间 ─> AI Agent
+NAS / 对象存储 ─┤                                      ├> CLI / 脚本
+本地文件系统   ─┘                                      └> 整理与分析工具
+```
+
+项目的直接起因是一次百度网盘全盘查重。为了按照“文件大小 + 稳定指纹”找出重复资源，当时不得不串行访问 1,824 次远端目录接口，以约 1.30 秒的平均间隔扫描 1,740 个目录和 17,050 个文件；第一次还因为远端字段语义不可靠而漏扫，完整过程接近一小时。使用 PanFind 后，同类任务只需读取一次本地快照并分组，不必再次遍历远端网盘。
+
+## 它能帮用户解决什么问题
+
+PanFind 不要求用户记得准确文件名，也不把搜索限制在文件元数据。用户只需向 Agent 描述自己知道的线索和想得到的答案。
+
+### 找到名称不可靠的资源
+
+```text
+我确定网盘里有《金特务》，但为了规避版权，目录可能叫“K忑物”、
+“JTW”或者“金”后面跟乱码。请结合目录结构、集数、文件大小、
+单集时长和公开资料找到它。
+```
+
+Agent 可以先用 PanFind 枚举可能的剧集目录，再结合首字母、字符残片、集数、容量和外部资料缩小范围；若元数据仍不足，可以在具备相应工具和权限时读取字幕、媒体标签或关键帧继续确认。
+
+### 理解一个资源集合，而不是罗列文件
+
+```text
+找出视频目录里的所有韩剧。中文译名也要识别，列出剧集目录，
+并计算它们总共占用了多少 GiB。
+```
+
+```text
+我的 PS3 游戏有哪些超过 10 GiB？很多游戏被拆成多个压缩分卷，
+请按游戏归并后统计，而不是把每个分卷当成一个游戏。
+```
+
+Agent 可以多轮查询目录和子文件，识别作品、归并分卷、递归计算容量，并说明无法确定的候选。
+
+### 把私人收藏和公共知识连接起来
+
+```text
+找出我收藏的国产古偶剧，结合豆瓣评分，列出超过 7 分的作品。
+```
+
+PanFind 负责回答“我拥有什么、放在哪里”，Agent 再查询公开资料，完成片名归一化、年份核对和评分筛选。
+
+### 从模糊记忆反推文件
+
+```text
+寻找一份约 10 MB 的 PDF，时间线索在 2010～2015 年。
+内容从物理网络、以太网讲到 TCP/IP 和应用层，名字和位置都不记得。
+先列出最相似的候选；候选不多时，可以下载后逐份阅读确认。
+```
+
+```text
+我能准确描述一张图片，但只知道它出现在网盘里的某本 PDF 中。
+请找到书名和具体页码。
+```
+
+Agent 可以先利用类型、大小、时间和路径词汇形成候选集，再在可用工具和用户授权范围内下载少量文件，提取文本、渲染页面或执行 OCR。PanFind 当前不读取文件内容，但它能避免在数万个文件中盲目下载。
+
+### 根据内容和结构识别陌生文件
+
+```text
+我的 PS3 游戏目录全是序号。请识别每个序号对应的游戏名称。
+```
+
+Agent 可以先检查 PanFind 已有的大小和哈希，尝试匹配公开校验库；必要时再下载候选或读取局部内容，从 ISO 中提取 `PARAM.SFO`、Title ID 等固定特征。电影场景、字幕台词、ROM/ISO 标识、压缩包清单和文档内容也可以采用类似的逐层探索方式。
+
+### 查重和空间整理
+
+```text
+找出所有大小和校验码完全相同的文件，按可释放空间排序。
+只生成报告，不要删除任何文件。
+```
+
+哈希存在时，PanFind 可以让 Agent 在本地快速完成全盘查重、目录容量排行和超大文件统计。是否删除、保留哪一份仍由用户决定；写操作不属于当前 PanFind。
+
+## 推荐用法：交给 AI Agent
+
+仓库内置 [`search-baidu-drive`](.agents/skills/search-baidu-drive/SKILL.md) Skill。用 Codex 打开本仓库后，可以直接用自然语言提出目标，也可以显式指定 `$search-baidu-drive`：
+
+```text
+使用 $search-baidu-drive 帮我调查网盘里所有可能重复的电影。
+文件名不一定相同，请综合大小、哈希、目录和作品信息，最后给出清单和依据。
+```
+
+这里的目标不是把自然语言机械翻译成一条 `find` 命令。Agent 应当围绕用户目标自由探索：
+
+1. 用 PanFind 快速了解文件树并获取第一批线索；
+2. 根据结果继续扩大、缩小或改变查询方向；
+3. 归并分卷、目录、剧集和不同命名的同一逻辑资源；
+4. 必要时联网核验别名、评分、剧情、哈希或产品资料；
+5. 如果环境提供下载和内容工具，在用户授权范围内检查少量候选文件；
+6. 返回结论、准确路径、判断依据、不确定性和下一步建议。
+
+“任意搜索需求”表示不限制用户描述目标的方式，也不预设只能使用文件元数据；它不意味着每个问题都必然能唯一命中。即使无法直接找到，Agent 也应尽量缩小候选范围并解释还缺少什么证据。
+
+Skill 的 Windows 脚本负责安全调用 PanFind、解析 JSON Lines、汇总完整匹配容量、限制展示数量，并生成精确的 `baidu:/` 路径和实验性网页目录链接。PanFind 本身保持只读；Agent 使用的联网、下载、PDF、OCR、音视频或格式分析工具具有各自独立的权限和安全边界。
+
+## 当前已经实现
 
 - 自动发现百度网盘 Windows 客户端的本地账号数据库；
 - 支持单账号自动选择和多账号显式选择；
 - 使用 SQLite 只读事务加载一致的完整快照；
-- 支持路径查找、目录遍历和稳定节点标识；
-- 支持文本、JSON Lines 和有限的 `-printf` 输出；
-- 支持前台 `watch`，数据库变化后在约一秒内全量刷新；
-- 新快照构建成功后原子切换 generation；
+- 提供路径查找、目录遍历、大小、修改时间、哈希和稳定节点标识；
+- 支持接近 GNU `find` 的组合查询、JSON Lines 和有限 `-printf`；
+- 提供机器可读的 `schema`、`capabilities` 和 `explain`；
+- 支持前台 `watch`，数据库变化后约一秒内构建并原子发布新快照；
 - 刷新失败时继续保留上一代完整快照并自动重试；
-- 提供适合脚本和 AI Agent 使用的 `schema`、`capabilities` 和 `explain` 命令。
+- 提供可被 Codex 发现的仓库级自然语言搜索 Skill。
 
-## 环境要求
+## 安装和运行
 
-- Windows 10 或 Windows 11；
-- 已安装并使用过百度网盘 Windows 客户端；
-- 从源码构建需要 Go 1.24 或更高版本。
+环境要求：Windows 10/11；已安装并使用过百度网盘 Windows 客户端。从源码构建需要 Go 1.24 或更高版本。
 
-PanFind 当前查找的数据库位置为：
-
-```text
-%APPDATA%\baidu\BaiduNetdisk\module\BrowserEngine\users\<account-id>\filecache.db
-```
-
-## 从源码构建
+私有仓库协作者可以从 [GitHub Releases](https://github.com/lenovobenben/panfind/releases) 下载 `panfind-windows-amd64.exe` 和 `SHA256SUMS.txt`，也可以从源码构建：
 
 ```powershell
 git clone git@github.com:lenovobenben/panfind.git
@@ -36,222 +136,71 @@ cd panfind
 go build -trimpath -o bin/panfind.exe ./cmd/panfind
 ```
 
-查看帮助和版本：
+把正式版 `panfind-windows-amd64.exe` 放在仓库根目录，Codex Skill 即可自动发现它；也可以直接运行 CLI：
 
 ```powershell
-.\bin\panfind.exe help
-.\bin\panfind.exe version
+.\panfind-windows-amd64.exe status
+.\panfind-windows-amd64.exe baidu:/ -type f -size +1G
+.\panfind-windows-amd64.exe baidu:/ -type f -iname "*.pdf" --json
+.\panfind-windows-amd64.exe schema --json
 ```
 
-项目使用纯 Go SQLite 驱动，构建不要求 CGO。
-
-## 下载正式版本
-
-私有仓库协作者可以从 [GitHub Releases](https://github.com/lenovobenben/panfind/releases) 下载：
-
-- `panfind-windows-amd64.exe`；
-- `SHA256SUMS.txt`。
-
-校验下载文件：
+完整参数以程序自身输出为准：
 
 ```powershell
-$expected = (Get-Content .\SHA256SUMS.txt).Split()[0]
-$actual = (Get-FileHash .\panfind-windows-amd64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-$actual -eq $expected
+.\panfind-windows-amd64.exe help
+.\panfind-windows-amd64.exe capabilities --json
+.\panfind-windows-amd64.exe explain baidu:/ -type f -size +1G --json
 ```
 
-输出 `True` 表示校验通过。正式构建会把 Git 标签注入版本信息，例如：
+## 远景
 
-```powershell
-.\panfind-windows-amd64.exe version
-# panfind v0.1.0
-```
+PanFind 的目标不是只支持百度网盘，也不是永远停留在一条 CLI 上。它希望成为类似 JuiceFS 元数据层的多存储中间层：不同存储通过 Provider Adapter 接入，上层始终使用同一套路径、目录、`stat`、遍历和能力语义。
 
-## 快速开始
+近期计划包括：
 
-查找大于 1 GiB 的文件：
+1. **Agent 原生搜索闭环**：让 Agent 以 PanFind 为索引入口，自由组合互联网核验、下载、PDF/OCR、音视频和格式分析工具；
+2. **查重与聚合能力**：完善哈希查询、目录容量、分卷归并、大文件排行和可释放空间报告；
+3. **可选内容读取能力**：为支持的 Provider 提供受控的 `open`、Range read 或下载接口，让 Agent 只读取必要候选；
+4. **夸克适配**：调查夸克客户端的本地元数据与能力边界，实现第二个 Provider；
+5. **统一多存储命名空间**：逐步接入其他网盘、对象存储、NAS 和本地文件系统，并支持跨存储查找与查重；
+6. **稳定服务接口**：在需要时增加后台服务或 IPC，让多个 Agent 和工具共享同一份新鲜快照。
 
-```powershell
-panfind baidu:/ -type f -size +1G
-```
+每个 Provider 可以拥有不同能力。PanFind 会显式声明它是否支持大小、时间、哈希、稳定 ID、内容读取和增量提示；上层 Agent 根据实际能力制定方案，而不是把缺失字段伪装成可靠数据。
 
-查找扩展名为 `.exe` 的文件，忽略大小写：
+更完整的目标和案例见 [产品愿景与使用场景](docs/产品愿景与使用场景.md)。早期 MVP 的技术取舍、数据源研究和实现细节继续保留在 [项目设计草案](docs/项目设计草案.md) 中。
 
-```powershell
-panfind baidu:/ -type f -iname "*.exe"
-```
+## 只读与隐私边界
 
-组合多个条件：
-
-```powershell
-panfind baidu:/ -type f '(' -iname "*.mkv" -o -iname "*.mp4" ')' -size +800M -size -2G
-```
-
-只查询某个子目录：
-
-```powershell
-panfind baidu:/资料 -type f -newermt 2025-01-01
-```
-
-## 账号选择
-
-列出已经发现的账号：
-
-```powershell
-panfind accounts
-panfind accounts --json
-```
-
-只有一个账号时，`query` 和 `watch` 会自动选择该账号。发现多个账号时，需要把 `--account` 紧跟在查询根路径后面：
-
-```powershell
-panfind baidu:/ --account <account-id> -type f -size +1G
-panfind watch baidu:/ --account <account-id> -type f -iname "*.mkv"
-```
-
-账号 ID 来自百度网盘客户端的本地用户目录。第一版不把账号编码进 `baidu:/` 路径。
-
-## 查询语法
-
-当前支持以下 GNU `find` 风格子集：
-
-| 类别 | 语法 |
-| --- | --- |
-| 类型 | `-type f`、`-type d` |
-| 名称 | `-name PATTERN`、`-iname PATTERN` |
-| 路径 | `-path PATTERN`、`-ipath PATTERN` |
-| 大小 | `-size N[cwbkMG]`，支持 `+N` 和 `-N` |
-| 时间 | `-mtime N`、`-newermt DATE` |
-| 深度 | `-mindepth N`、`-maxdepth N` |
-| 逻辑 | 隐式 AND、`-a`、`-o`、`!`、括号 |
-| 动作 | `-print`、终端位置的 `-printf FORMAT` |
-
-运算符优先级为：`!` 高于 AND，AND 高于 OR。`-mindepth` 和 `-maxdepth` 当前必须出现在查询谓词之前。
-
-`-printf` 当前支持：
-
-- `%p`：完整云盘路径；
-- `%f`：文件名；
-- `%s`：字节大小；
-- `%y`：节点类型；
-- `%T+`：修改时间；
-- `%%`：百分号；
-- `\n`、`\t`、`\0`、`\\`：常用转义。
-
-查看机器可读的完整语法和解析结果：
-
-```powershell
-panfind schema --json
-panfind explain baidu:/ -type f -size +1G --json
-```
-
-## 输出
-
-默认每行输出一个云盘路径：
-
-```text
-baidu:/电影/example.mkv
-```
-
-JSON Lines 输出适合 `jq`、脚本或 Agent 逐条消费：
-
-```powershell
-panfind baidu:/ -type f -size +1G --json
-```
-
-示例记录：
-
-```json
-{"path":"baidu:/电影/example.mkv","type":"file","size":2147483648,"modified_at":"2025-08-01T10:00:00Z"}
-```
-
-自定义输出：
-
-```powershell
-panfind baidu:/ -type f -printf "%p\t%s\n"
-```
-
-## 持续查询
-
-`watch` 在前台维持一个同步会话，并在首代快照以及每次成功发布新 generation 后重新执行同一条查询：
-
-```powershell
-panfind watch baidu:/ -type f -iname "*.mkv"
-panfind watch baidu:/ -type f -size +1G --json
-```
-
-文本模式通过 stderr 报告 generation 和匹配数量。JSON Lines 模式会为每条结果增加 `generation` 字段。每一代输出的是完整匹配集合，不是增量事件；使用 Ctrl+C 结束。
-
-当前实现轮询 `filecache.db`、WAL、SHM 和父目录的变化提示，合并短时间内的突发变化后重新构建完整快照。它不是后台服务，也不提供 IPC 或第二份持久化缓存。
-
-## 状态和能力
-
-```powershell
-panfind status
-panfind status --json
-panfind capabilities
-panfind capabilities --json
-```
-
-`status` 会发现账号、加载当前快照并显示 generation、节点数、文件数和目录数。`capabilities` 描述当前百度本地数据源能够可靠提供的字段。
-
-## 退出码
-
-| 退出码 | 含义 |
-| ---: | --- |
-| `0` | 命令成功；一次性查询至少产生一个结果 |
-| `1` | 查询合法但没有匹配结果 |
-| `2` | 命令、查询、选项或格式错误 |
-| `3` | 账号发现、数据库读取、schema 或命名空间错误 |
-| `4` | 结果输出失败 |
-
-下游命令正常提前关闭管道时，PanFind 按成功处理。
-
-## 只读和隐私边界
-
-PanFind 将用户文件名、路径、大小、哈希和时间视为敏感数据。当前版本：
+PanFind 将文件名、路径、大小、哈希和时间视为敏感数据。当前版本：
 
 - 只读取官方客户端的本地 SQLite 数据库；
 - 使用 `mode=ro`、`query_only` 和只读事务；
-- 不向官方数据库添加表、索引或触发器；
-- 不修改百度网盘客户端配置；
+- 不修改官方数据库、客户端配置或用户网盘内容；
 - 不要求 BDUSS、Cookie、账号密码或开发者密钥；
-- 不上传文件元数据，也不包含遥测功能。
+- 不上传元数据，也不包含遥测；
+- 遇到不支持的数据库结构时明确失败，不返回貌似正确的结果。
 
-官方客户端关闭后，本地数据库可能不会包含其他设备刚刚产生的云端变化。PanFind 展示的是本地缓存视图，不应被理解为实时远端视图。
-
-`filecache.db` 是百度网盘客户端的内部实现，并非稳定公开协议。客户端升级可能改变路径或表结构；PanFind 遇到不支持的 schema 时会明确失败，不返回貌似正确的结果。
+官方客户端关闭后，本地缓存可能不包含其他设备刚产生的云端变化。`filecache.db` 也是百度客户端的内部实现，未来版本可能改变路径或结构。
 
 ## 当前限制
 
-- 仅支持百度网盘 Windows 客户端的本地元数据；
-- 不支持上传、下载、删除、移动、重命名和文件内容搜索；
-- 不支持 GUI、后台守护进程和远端 API；
+- 当前仅支持百度网盘 Windows 客户端的本地元数据；
+- PanFind 核心不上传、下载、删除、移动、重命名或搜索文件内容；
 - 不提供可靠的创建时间或加入网盘时间；
-- `watch` 会重复输出每代完整结果，而不是输出差异；
-- 尚未承诺兼容 GNU `find` 未列出的选项和细节；
+- 网页目录链接依赖百度未公开的前端路由，只作为定位便利；
 - 正式 Release 当前只提供 Windows amd64 单文件版本。
 
-## 开发和验证
+这些是当前 Provider 和 MVP 的边界，不是对 Agent 探索能力的永久限制。
 
-运行测试和静态检查：
+## 开发与验证
 
 ```powershell
 go test ./...
 go vet ./...
 ```
 
-查询包包含 22 个与 GNU `find` 对照的固定差分案例。Windows 默认查找 Git for Windows 附带的 `find.exe`；也可以通过 `PANFIND_GNU_FIND` 指定 GNU findutils 可执行文件。环境中没有 GNU findutils 时，差分用例会明确跳过。
-
-运行基准：
-
-```powershell
-go test -bench=. -benchmem ./internal/namespace ./internal/query
-```
-
-私有仓库的 `Windows CI` 工作流会在 push、pull request 和手动触发时执行完整测试、`go vet`、GNU `find` 差分测试和单文件构建，并保留 Windows amd64 exe artifact 7 天。CI artifact 是开发构建，不等同于正式 Release。
-
-项目已经使用真实的约 1.8 万节点百度缓存进行只读验证，并包含 10 万和 100 万节点合成基准。受控 SQLite 集成测试覆盖了 WAL 写入、增删改移、无效数据、排他锁、失败保留和恢复刷新；GNU `find` 差分测试用于固定已承诺的查询语义。正式 Release 工作流从 `vMAJOR.MINOR.PATCH` 标签构建、验证版本、生成 SHA-256 校验文件并发布资产。后续开发不继续提前优化内存或引入增量同步。
+项目已经使用真实的约 1.8 万节点百度缓存进行只读验证，并包含 10 万和 100 万节点合成基准。受控 SQLite 集成测试覆盖 WAL 写入、增删改移、无效数据、排他锁、失败保留和恢复刷新；另有 GNU `find` 差分测试固定已承诺的查询语义。
 
 ## 许可证
 

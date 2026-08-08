@@ -1,0 +1,4 @@
+interface:
+  display_name: "搜索百度网盘"
+  short_description: "让 AI 结合元数据与内容分析，自由探索并定位百度网盘资源"
+  default_prompt: "使用 $search-baidu-drive 自由探索我的百度网盘，结合可用工具完成搜索目标并给出证据和准确位置。"

@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	ProviderID      namespace.ProviderID = "quark-remote"
-	syntheticRootID int64                = math.MinInt64
-	rootRemoteID                         = "0"
+	ProviderID                   namespace.ProviderID = "quark-remote"
+	syntheticRootID              int64                = math.MinInt64
+	rootRemoteID                                      = "0"
+	retainedCompletedGenerations                      = 2
 )
 
 var errNoPublishedSnapshot = errors.New("no published Quark snapshot")
@@ -121,11 +122,45 @@ func (s *store) publishGeneration(ctx context.Context, runID int64) (*namespace.
 	`, accountID, runID); err != nil {
 		return nil, fmt.Errorf("publish Quark generation %d: %w", runID, err)
 	}
+	if err := pruneCompletedGenerations(ctx, tx, accountID); err != nil {
+		return nil, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit Quark generation %d: %w", runID, err)
 	}
 	return snapshot, nil
+}
+
+func pruneCompletedGenerations(ctx context.Context, tx *sql.Tx, accountID namespace.AccountID) error {
+	for _, table := range []string{"crawl_queue", "nodes"} {
+		statement := fmt.Sprintf(`
+			DELETE FROM %s
+			WHERE run_id IN (
+				SELECT run_id
+				FROM sync_runs
+				WHERE account_id = ? AND state = 'complete'
+				ORDER BY run_id DESC
+				LIMIT -1 OFFSET ?
+			)
+		`, table)
+		if _, err := tx.ExecContext(ctx, statement, accountID, retainedCompletedGenerations); err != nil {
+			return fmt.Errorf("prune old Quark generation %s: %w", table, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM sync_runs
+		WHERE run_id IN (
+			SELECT run_id
+			FROM sync_runs
+			WHERE account_id = ? AND state = 'complete'
+			ORDER BY run_id DESC
+			LIMIT -1 OFFSET ?
+		)
+	`, accountID, retainedCompletedGenerations); err != nil {
+		return fmt.Errorf("prune old Quark generation records: %w", err)
+	}
+	return nil
 }
 
 func (s *store) loadPublishedSnapshot(ctx context.Context, accountID namespace.AccountID, generation uint64) (*namespace.Snapshot, error) {

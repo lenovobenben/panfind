@@ -154,6 +154,76 @@ func TestStoreDoesNotExposeStagingGeneration(t *testing.T) {
 	}
 }
 
+func TestPublishPrunesOldCompletedGenerationsPerAccount(t *testing.T) {
+	ctx := context.Background()
+	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	defer store.close()
+
+	otherRun := publishEmptyGeneration(t, store, "account-2")
+	if _, err := store.resolveRemoteIDs(ctx, "account-1", []string{"stable-file"}); err != nil {
+		t.Fatalf("resolveRemoteIDs() error: %v", err)
+	}
+	runs := make([]int64, retainedCompletedGenerations+1)
+	for index := range runs {
+		runs[index] = publishEmptyGeneration(t, store, "account-1")
+	}
+
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT run_id
+		FROM sync_runs
+		WHERE account_id = ? AND state = 'complete'
+		ORDER BY run_id
+	`, "account-1")
+	if err != nil {
+		t.Fatalf("read retained generations: %v", err)
+	}
+	var retained []int64
+	for rows.Next() {
+		var runID int64
+		if err := rows.Scan(&runID); err != nil {
+			rows.Close()
+			t.Fatalf("scan retained generation: %v", err)
+		}
+		retained = append(retained, runID)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close retained generations: %v", err)
+	}
+	if len(retained) != retainedCompletedGenerations || retained[0] != runs[1] || retained[1] != runs[2] {
+		t.Fatalf("retained generations = %v, all runs = %v", retained, runs)
+	}
+	for _, table := range []string{"sync_runs", "nodes", "crawl_queue"} {
+		var count int
+		query := "SELECT COUNT(*) FROM " + table + " WHERE run_id = ?"
+		if err := store.db.QueryRowContext(ctx, query, runs[0]).Scan(&count); err != nil {
+			t.Fatalf("count pruned %s rows: %v", table, err)
+		}
+		if count != 0 {
+			t.Errorf("old generation retained %d %s rows", count, table)
+		}
+	}
+	var otherCount, remoteIDCount int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sync_runs WHERE run_id = ?", otherRun).Scan(&otherCount); err != nil {
+		t.Fatalf("count other account generation: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM remote_ids WHERE account_id = ?", "account-1").Scan(&remoteIDCount); err != nil {
+		t.Fatalf("count stable remote IDs: %v", err)
+	}
+	if otherCount != 1 || remoteIDCount != 1 {
+		t.Fatalf("other generation count = %d, stable remote ID count = %d", otherCount, remoteIDCount)
+	}
+	var publishedRun int64
+	if err := store.db.QueryRowContext(ctx, "SELECT run_id FROM published_generations WHERE account_id = ?", "account-1").Scan(&publishedRun); err != nil {
+		t.Fatalf("read published generation: %v", err)
+	}
+	if publishedRun != runs[len(runs)-1] {
+		t.Fatalf("published generation = %d, want %d", publishedRun, runs[len(runs)-1])
+	}
+}
+
 func TestCommitCrawlPageRejectsAnotherAccount(t *testing.T) {
 	ctx := context.Background()
 	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
@@ -210,4 +280,21 @@ func assertSnapshotFile(t *testing.T, snapshot *namespace.Snapshot, path string,
 	if node.Size != size || node.ModifiedAt == nil || !node.ModifiedAt.Equal(modifiedAt) {
 		t.Fatalf("unexpected file node: %+v", node)
 	}
+}
+
+func publishEmptyGeneration(t *testing.T, store *store, accountID namespace.AccountID) int64 {
+	t.Helper()
+	ctx := context.Background()
+	runID, err := store.beginGeneration(ctx, accountID)
+	if err != nil {
+		t.Fatalf("beginGeneration(%q) error: %v", accountID, err)
+	}
+	page := mustNextCrawlPage(t, store, runID)
+	if err := store.commitCrawlPage(ctx, runID, page, nil, true); err != nil {
+		t.Fatalf("commitCrawlPage(%q) error: %v", accountID, err)
+	}
+	if _, err := store.publishGeneration(ctx, runID); err != nil {
+		t.Fatalf("publishGeneration(%q) error: %v", accountID, err)
+	}
+	return runID
 }

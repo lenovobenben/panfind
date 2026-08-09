@@ -94,6 +94,68 @@ func TestScannerBuildsRecursiveSnapshot(t *testing.T) {
 	}
 }
 
+func TestScannerStopsWhenRefreshHeartbeatIsLost(t *testing.T) {
+	ctx := context.Background()
+	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	defer store.close()
+	runID, err := store.beginGeneration(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("beginGeneration() error: %v", err)
+	}
+	client := &scriptedDirectoryClient{responses: map[listDirectoryRequest]directoryResponse{}}
+	scanner, err := newScanner(store, client, 1)
+	if err != nil {
+		t.Fatalf("newScanner() error: %v", err)
+	}
+	scanner.heartbeat = func(context.Context) error { return errQuarkRefreshLeaseLost }
+	if _, err := scanner.run(ctx, runID); !errors.Is(err, errQuarkRefreshLeaseLost) {
+		t.Fatalf("run() error = %v", err)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("scanner made requests after losing lease: %+v", client.requests)
+	}
+}
+
+func TestScannerRenewsHeartbeatAfterRemoteRequestBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	defer store.close()
+	runID, err := store.beginGeneration(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("beginGeneration() error: %v", err)
+	}
+	request := listDirectoryRequest{DirectoryID: rootRemoteID, Page: 1, Size: 1}
+	client := &scriptedDirectoryClient{responses: map[listDirectoryRequest]directoryResponse{request: {}}}
+	scanner, err := newScanner(store, client, 1)
+	if err != nil {
+		t.Fatalf("newScanner() error: %v", err)
+	}
+	heartbeats := 0
+	scanner.heartbeat = func(context.Context) error {
+		heartbeats++
+		if heartbeats == 2 {
+			return errQuarkRefreshLeaseLost
+		}
+		return nil
+	}
+	if _, err := scanner.run(ctx, runID); !errors.Is(err, errQuarkRefreshLeaseLost) {
+		t.Fatalf("run() error = %v", err)
+	}
+	if len(client.requests) != 1 || heartbeats != 2 {
+		t.Fatalf("requests = %+v, heartbeats = %d", client.requests, heartbeats)
+	}
+	page := mustNextCrawlPage(t, store, runID)
+	if page.Number != 1 {
+		t.Fatalf("page was committed after lease loss: %+v", page)
+	}
+}
+
 func TestScannerResumesFailedPage(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.db")

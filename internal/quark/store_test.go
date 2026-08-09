@@ -97,7 +97,7 @@ func TestOpenStoreRejectsNewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 5"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 6"); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -216,5 +216,19 @@ func TestOpenStoreMigratesRefreshStatusSchema(t *testing.T) {
 		if !found {
 			t.Errorf("migrated sync_runs is missing %s", name)
 		}
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close sync_runs columns: %v", err)
+	}
+	var leaseTable string
+	if err := store.db.QueryRow(`
+		SELECT name
+		FROM sqlite_master
+		WHERE type = 'table' AND name = 'refresh_leases'
+	`).Scan(&leaseTable); err != nil {
+		t.Fatalf("read migrated refresh lease table: %v", err)
+	}
+	if leaseTable != "refresh_leases" {
+		t.Fatalf("migrated refresh lease table = %q", leaseTable)
 	}
 }

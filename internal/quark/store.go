@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const storeSchemaVersion = 4
+const storeSchemaVersion = 5
 
 var errUnsupportedStoreSchema = errors.New("unsupported Quark metadata store schema")
 
@@ -25,6 +25,10 @@ func openStore(databasePath string) (*store, error) {
 		return nil, fmt.Errorf("open Quark metadata store: %w", err)
 	}
 	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("configure Quark metadata store busy timeout: %w", err)
+	}
 
 	result := &store{db: db}
 	if err := result.initialize(context.Background()); err != nil {
@@ -119,7 +123,18 @@ func (s *store) initialize(ctx context.Context) error {
 			return fmt.Errorf("add Quark sync status schema: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 4"); err != nil {
+	if version < 5 {
+		if _, err := tx.ExecContext(ctx, `
+			CREATE TABLE refresh_leases(
+				account_id TEXT PRIMARY KEY,
+				owner_id TEXT NOT NULL,
+				heartbeat_unix_ms INTEGER NOT NULL
+			);
+		`); err != nil {
+			return fmt.Errorf("create Quark refresh lease schema: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
 		return fmt.Errorf("write Quark metadata store schema version: %w", err)
 	}
 

@@ -110,6 +110,13 @@ func TestRefreshRunnerAuthenticatesScansAndClosesSession(t *testing.T) {
 	if _, exists, err := store.stagingGeneration(ctx, "account-1"); err != nil || exists {
 		t.Fatalf("stagingGeneration() after publish = exists %t, error %v", exists, err)
 	}
+	lease, err := store.acquireRefreshLease(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("refresh lease was not released: %v", err)
+	}
+	if err := lease.release(ctx); err != nil {
+		t.Fatalf("release verification lease: %v", err)
+	}
 }
 
 func TestRefreshRunnerRetriesTransientPageWithoutReauthorization(t *testing.T) {
@@ -148,6 +155,37 @@ func TestRefreshRunnerRetriesTransientPageWithoutReauthorization(t *testing.T) {
 	}
 	if !session.closed {
 		t.Fatal("refresh did not close its session")
+	}
+}
+
+func TestRefreshRunnerRejectsConcurrentRefreshForSameAccount(t *testing.T) {
+	ctx := context.Background()
+	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	defer store.close()
+
+	existingLease, err := store.acquireRefreshLease(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("acquire existing lease: %v", err)
+	}
+	defer existingLease.release(ctx)
+	session := &fakeRefreshSession{client: &scriptedDirectoryClient{}}
+	runner, err := newRefreshRunner(store, &fakeAuthorizationProvider{authorizations: []*fakePendingAuthorization{{
+		id: "account-1", session: session,
+	}}}, 1)
+	if err != nil {
+		t.Fatalf("newRefreshRunner() error: %v", err)
+	}
+	if _, err := runner.run(ctx, nil); !errors.Is(err, errQuarkRefreshInProgress) {
+		t.Fatalf("run() error = %v", err)
+	}
+	if !session.closed {
+		t.Fatal("rejected concurrent refresh did not close its session")
+	}
+	if _, exists, err := store.stagingGeneration(ctx, "account-1"); err != nil || exists {
+		t.Fatalf("concurrent refresh staging generation = exists %t, error %v", exists, err)
 	}
 }
 
@@ -404,6 +442,13 @@ func TestRefreshRunnerClosesSessionAndRecordsCanceledScan(t *testing.T) {
 	}
 	if status.State != RefreshStateFailed || !strings.Contains(status.LastError, context.Canceled.Error()) {
 		t.Fatalf("refreshStatus() = %+v", status)
+	}
+	lease, err := store.acquireRefreshLease(context.Background(), "account-1")
+	if err != nil {
+		t.Fatalf("canceled refresh lease was not released: %v", err)
+	}
+	if err := lease.release(context.Background()); err != nil {
+		t.Fatalf("release verification lease: %v", err)
 	}
 }
 

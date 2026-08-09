@@ -103,11 +103,32 @@ func newRefreshRunner(store *store, authorization authorizationProvider, pageSiz
 
 // run obtains short-lived desktop sessions until the current account's
 // staging generation is published or cannot make bounded progress.
-func (runner *refreshRunner) run(ctx context.Context, observe func(AuthorizationNotice)) (*namespace.Snapshot, error) {
+func (runner *refreshRunner) run(ctx context.Context, observe func(AuthorizationNotice)) (snapshot *namespace.Snapshot, runErr error) {
 	var accountID namespace.AccountID
 	var runID int64
+	var lease *refreshLease
+	defer func() {
+		if lease == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		if err := lease.release(cleanupCtx); err != nil {
+			if runErr != nil {
+				runErr = errors.Join(runErr, err)
+				return
+			}
+			snapshot = nil
+			runErr = err
+		}
+	}()
 	noProgressExpirations := 0
 	for {
+		if lease != nil {
+			if err := lease.renew(ctx); err != nil {
+				return nil, runner.fail(ctx, runID, err)
+			}
+		}
 		authorization, err := runner.authorization.begin(ctx)
 		if err != nil {
 			return nil, runner.fail(ctx, runID, fmt.Errorf("begin Quark desktop authorization: %w", err))
@@ -137,6 +158,11 @@ func (runner *refreshRunner) run(ctx context.Context, observe func(Authorization
 		}
 		if runID == 0 {
 			accountID = candidateAccountID
+			lease, err = runner.store.acquireRefreshLease(ctx, accountID)
+			if err != nil {
+				session.close()
+				return nil, err
+			}
 			runID, err = runner.resumeOrBeginGeneration(ctx, accountID)
 			if err != nil {
 				session.close()
@@ -149,7 +175,7 @@ func (runner *refreshRunner) run(ctx context.Context, observe func(Authorization
 			session.close()
 			return nil, runner.fail(ctx, runID, err)
 		}
-		snapshot, refreshErr := runner.runSession(ctx, runID, session)
+		snapshot, refreshErr := runner.runSession(ctx, runID, session, lease)
 		if refreshErr == nil {
 			return snapshot, nil
 		}
@@ -189,7 +215,12 @@ func (runner *refreshRunner) resumeOrBeginGeneration(ctx context.Context, accoun
 	return runner.store.beginGeneration(ctx, accountID)
 }
 
-func (runner *refreshRunner) runSession(ctx context.Context, runID int64, session refreshSession) (*namespace.Snapshot, error) {
+func (runner *refreshRunner) runSession(
+	ctx context.Context,
+	runID int64,
+	session refreshSession,
+	lease *refreshLease,
+) (*namespace.Snapshot, error) {
 	defer session.close()
 	if err := runner.store.markGenerationAttempt(ctx, runID); err != nil {
 		return nil, err
@@ -206,6 +237,7 @@ func (runner *refreshRunner) runSession(ctx context.Context, runID int64, sessio
 	if err != nil {
 		return nil, err
 	}
+	scanner.heartbeat = lease.renew
 	return scanner.run(ctx, runID)
 }
 

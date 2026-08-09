@@ -35,9 +35,10 @@ type directoryClient interface {
 }
 
 type scanner struct {
-	store    *store
-	client   directoryClient
-	pageSize int
+	store     *store
+	client    directoryClient
+	pageSize  int
+	heartbeat func(context.Context) error
 }
 
 func newScanner(store *store, client directoryClient, pageSize int) (*scanner, error) {
@@ -57,6 +58,11 @@ func newScanner(store *store, client directoryClient, pageSize int) (*scanner, e
 // directory has been read to its terminal page.
 func (s *scanner) run(ctx context.Context, runID int64) (*namespace.Snapshot, error) {
 	for {
+		if s.heartbeat != nil {
+			if err := s.heartbeat(ctx); err != nil {
+				return nil, err
+			}
+		}
 		page, exists, err := s.store.nextCrawlPage(ctx, runID)
 		if err != nil {
 			return nil, err
@@ -72,6 +78,11 @@ func (s *scanner) run(ctx context.Context, runID int64) (*namespace.Snapshot, er
 		})
 		if err != nil {
 			return nil, fmt.Errorf("list Quark directory %d page %d: %w", page.DirectoryID, page.Number, err)
+		}
+		if s.heartbeat != nil {
+			if err := s.heartbeat(ctx); err != nil {
+				return nil, err
+			}
 		}
 		if len(remoteNodes) > s.pageSize {
 			return nil, fmt.Errorf("Quark directory %d page %d returned %d nodes, limit %d", page.DirectoryID, page.Number, len(remoteNodes), s.pageSize)

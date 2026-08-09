@@ -115,6 +115,14 @@ func runRefresh(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 func runQuarkRefresh(ctx context.Context, adapter quarkRefreshAdapter, jsonOutput bool, stdout, stderr io.Writer) int {
 	snapshot, err := adapter.Refresh(ctx, func(notice quark.AuthorizationNotice) {
+		if notice.Reauthorization {
+			if notice.PromptOpened {
+				fmt.Fprintln(stderr, "panfind refresh: Quark session expired; confirm the new request in the desktop client")
+				return
+			}
+			fmt.Fprintln(stderr, "panfind refresh: Quark session expired; waiting for a new desktop confirmation")
+			return
+		}
 		if notice.PromptOpened {
 			fmt.Fprintln(stderr, "panfind refresh: confirm the request in the Quark desktop client")
 			return

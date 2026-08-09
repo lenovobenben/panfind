@@ -23,6 +23,46 @@ type crawledNode struct {
 	Node     namespace.Node
 }
 
+type crawlProgress struct {
+	Nodes                int64
+	Directories          int64
+	CompletedDirectories int64
+	NextPages            int64
+}
+
+func (s *store) crawlProgress(ctx context.Context, runID int64) (crawlProgress, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return crawlProgress{}, fmt.Errorf("begin Quark crawl progress read: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := stagingAccount(ctx, tx, runID); err != nil {
+		return crawlProgress{}, err
+	}
+
+	var progress crawlProgress
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       COALESCE(SUM(state = 'complete'), 0),
+		       COALESCE(SUM(next_page), 0)
+		FROM crawl_queue
+		WHERE run_id = ?
+	`, runID).Scan(&progress.Directories, &progress.CompletedDirectories, &progress.NextPages); err != nil {
+		return crawlProgress{}, fmt.Errorf("read Quark crawl queue progress: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM nodes
+		WHERE run_id = ?
+	`, runID).Scan(&progress.Nodes); err != nil {
+		return crawlProgress{}, fmt.Errorf("read Quark crawl node progress: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return crawlProgress{}, fmt.Errorf("commit Quark crawl progress read: %w", err)
+	}
+	return progress, nil
+}
+
 // nextCrawlPage returns the oldest directory that has not been fully scanned.
 // A page remains pending until commitCrawlPage atomically advances it.
 func (s *store) nextCrawlPage(ctx context.Context, runID int64) (crawlPage, bool, error) {

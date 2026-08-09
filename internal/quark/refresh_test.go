@@ -13,9 +13,13 @@ import (
 type fakeAuthorizationProvider struct {
 	authorizations []*fakePendingAuthorization
 	calls          int
+	onBegin        func(int)
 }
 
 func (provider *fakeAuthorizationProvider) begin(context.Context) (pendingRefreshAuthorization, error) {
+	if provider.onBegin != nil {
+		provider.onBegin(provider.calls)
+	}
 	if provider.calls >= len(provider.authorizations) {
 		return nil, errors.New("unexpected authorization request")
 	}
@@ -55,6 +59,15 @@ func (session *fakeRefreshSession) directoryClient() (directoryClient, error) {
 
 func (session *fakeRefreshSession) close() {
 	session.closed = true
+}
+
+type cancelingDirectoryClient struct {
+	cancel context.CancelFunc
+}
+
+func (client *cancelingDirectoryClient) ListDirectory(ctx context.Context, _ listDirectoryRequest) ([]remoteNode, error) {
+	client.cancel()
+	return nil, ctx.Err()
 }
 
 func TestRefreshRunnerAuthenticatesScansAndClosesSession(t *testing.T) {
@@ -113,60 +126,67 @@ func TestRefreshRunnerResumesCheckpointAfterAuthenticationExpires(t *testing.T) 
 		{DirectoryID: rootRemoteID, Page: 2, Size: 1}: {err: errQuarkAuthenticationExpired},
 	}}
 	firstSession := &fakeRefreshSession{client: firstClient}
-	firstRunner, err := newRefreshRunner(store, &fakeAuthorizationProvider{authorizations: []*fakePendingAuthorization{{
-		id: "account-1", session: firstSession,
-	}}}, 1)
-	if err != nil {
-		t.Fatalf("newRefreshRunner() error: %v", err)
-	}
-	if _, err := firstRunner.run(ctx, nil); !errors.Is(err, errQuarkAuthenticationExpired) {
-		t.Fatalf("first run() error = %v", err)
-	}
-	if !firstSession.closed {
-		t.Fatal("failed refresh did not close its session")
-	}
-	runID, exists, err := store.stagingGeneration(ctx, "account-1")
-	if err != nil || !exists {
-		t.Fatalf("stagingGeneration() after failure = (%d, %t, %v)", runID, exists, err)
-	}
-	page := mustNextCrawlPage(t, store, runID)
-	if page.Number != 2 {
-		t.Fatalf("checkpoint after authentication expiry = %+v", page)
-	}
-	failedStatus, err := store.refreshStatus(ctx, "account-1")
-	if err != nil {
-		t.Fatalf("refreshStatus() after failure error: %v", err)
-	}
-	if failedStatus.State != RefreshStateFailed || failedStatus.StagingGeneration != runID ||
-		failedStatus.StartedAt == nil || failedStatus.LastAttemptAt == nil || failedStatus.LastProgressAt == nil ||
-		!strings.Contains(failedStatus.LastError, errQuarkAuthenticationExpired.Error()) ||
-		failedStatus.DirectoriesDiscovered != 1 || failedStatus.DirectoriesCompleted != 0 ||
-		failedStatus.DirectoriesPending != 1 || failedStatus.StagedNodes != 1 {
-		t.Fatalf("refreshStatus() after failure = %+v", failedStatus)
-	}
-
 	secondClient := &scriptedDirectoryClient{responses: map[listDirectoryRequest]directoryResponse{
 		{DirectoryID: rootRemoteID, Page: 2, Size: 1}: {},
 	}}
 	secondSession := &fakeRefreshSession{client: secondClient}
-	secondRunner, err := newRefreshRunner(store, &fakeAuthorizationProvider{authorizations: []*fakePendingAuthorization{{
-		id: "account-1", session: secondSession,
-	}}}, 1)
-	if err != nil {
-		t.Fatalf("newRefreshRunner() for resume error: %v", err)
+	provider := &fakeAuthorizationProvider{authorizations: []*fakePendingAuthorization{
+		{id: "account-1", session: firstSession},
+		{id: "account-1", prompt: true, session: secondSession},
+	}}
+	var runID int64
+	provider.onBegin = func(call int) {
+		if call != 1 {
+			return
+		}
+		if !firstSession.closed {
+			t.Fatal("expired session was not closed before reauthorization")
+		}
+		var exists bool
+		var err error
+		runID, exists, err = store.stagingGeneration(ctx, "account-1")
+		if err != nil || !exists {
+			t.Fatalf("stagingGeneration() before reauthorization = (%d, %t, %v)", runID, exists, err)
+		}
+		page := mustNextCrawlPage(t, store, runID)
+		if page.Number != 2 {
+			t.Fatalf("checkpoint before reauthorization = %+v", page)
+		}
+		failedStatus, err := store.refreshStatus(ctx, "account-1")
+		if err != nil {
+			t.Fatalf("refreshStatus() before reauthorization error: %v", err)
+		}
+		if failedStatus.State != RefreshStateFailed || failedStatus.StagingGeneration != runID ||
+			failedStatus.StartedAt == nil || failedStatus.LastAttemptAt == nil || failedStatus.LastProgressAt == nil ||
+			!strings.Contains(failedStatus.LastError, errQuarkAuthenticationExpired.Error()) ||
+			failedStatus.DirectoriesDiscovered != 1 || failedStatus.DirectoriesCompleted != 0 ||
+			failedStatus.DirectoriesPending != 1 || failedStatus.StagedNodes != 1 {
+			t.Fatalf("refreshStatus() before reauthorization = %+v", failedStatus)
+		}
 	}
-	snapshot, err := secondRunner.run(ctx, nil)
+	runner, err := newRefreshRunner(store, provider, 1)
 	if err != nil {
-		t.Fatalf("resumed run() error: %v", err)
+		t.Fatalf("newRefreshRunner() error: %v", err)
+	}
+	var notices []AuthorizationNotice
+	snapshot, err := runner.run(ctx, func(notice AuthorizationNotice) {
+		notices = append(notices, notice)
+	})
+	if err != nil {
+		t.Fatalf("run() error: %v", err)
+	}
+	if provider.calls != 2 || len(notices) != 2 || notices[0].Reauthorization || !notices[1].Reauthorization ||
+		!notices[1].PromptOpened {
+		t.Fatalf("authorization calls = %d, notices = %+v", provider.calls, notices)
 	}
 	if snapshot.Generation() != uint64(runID) {
-		t.Fatalf("resumed generation = %d, want %d", snapshot.Generation(), runID)
+		t.Fatalf("published generation = %d, want %d", snapshot.Generation(), runID)
 	}
 	if _, exists := snapshot.Lookup("/file.txt"); !exists {
-		t.Fatal("resumed snapshot lost the first committed page")
+		t.Fatal("published snapshot lost the first committed page")
 	}
 	if !secondSession.closed {
-		t.Fatal("resumed refresh did not close its session")
+		t.Fatal("replacement session was not closed")
 	}
 	readyStatus, err := store.refreshStatus(ctx, "account-1")
 	if err != nil {
@@ -175,6 +195,175 @@ func TestRefreshRunnerResumesCheckpointAfterAuthenticationExpires(t *testing.T) 
 	if readyStatus.State != RefreshStateReady || readyStatus.PublishedGeneration != runID ||
 		readyStatus.SnapshotUpdatedAt == nil || readyStatus.StagingGeneration != 0 || readyStatus.LastError != "" {
 		t.Fatalf("refreshStatus() after publish = %+v", readyStatus)
+	}
+}
+
+func TestRefreshRunnerBoundsAuthenticationExpiryWithoutProgress(t *testing.T) {
+	ctx := context.Background()
+	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	defer store.close()
+
+	provider := &fakeAuthorizationProvider{}
+	sessions := make([]*fakeRefreshSession, maxAuthenticationExpirationsWithoutProgress)
+	for index := range sessions {
+		client := &scriptedDirectoryClient{responses: map[listDirectoryRequest]directoryResponse{
+			{DirectoryID: rootRemoteID, Page: 1, Size: 1}: {err: errQuarkAuthenticationExpired},
+		}}
+		sessions[index] = &fakeRefreshSession{client: client}
+		provider.authorizations = append(provider.authorizations, &fakePendingAuthorization{
+			id: "account-1", session: sessions[index],
+		})
+	}
+	runner, err := newRefreshRunner(store, provider, 1)
+	if err != nil {
+		t.Fatalf("newRefreshRunner() error: %v", err)
+	}
+	var notices []AuthorizationNotice
+	_, err = runner.run(ctx, func(notice AuthorizationNotice) {
+		notices = append(notices, notice)
+	})
+	if !errors.Is(err, errQuarkAuthenticationExpired) ||
+		!strings.Contains(err.Error(), "3 consecutive sessions without committed scan progress") {
+		t.Fatalf("run() error = %v", err)
+	}
+	if provider.calls != maxAuthenticationExpirationsWithoutProgress || len(notices) != provider.calls {
+		t.Fatalf("authorization calls = %d, notices = %+v", provider.calls, notices)
+	}
+	for index, session := range sessions {
+		if !session.closed {
+			t.Errorf("session %d was not closed", index)
+		}
+	}
+	if notices[0].Reauthorization || !notices[1].Reauthorization || !notices[2].Reauthorization {
+		t.Fatalf("reauthorization notices = %+v", notices)
+	}
+	status, err := store.refreshStatus(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("refreshStatus() error: %v", err)
+	}
+	if status.State != RefreshStateFailed ||
+		!strings.Contains(status.LastError, "3 consecutive sessions without committed scan progress") {
+		t.Fatalf("refreshStatus() = %+v", status)
+	}
+}
+
+func TestRefreshRunnerResetsExpiryBoundAfterCommittedProgress(t *testing.T) {
+	ctx := context.Background()
+	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	defer store.close()
+
+	responses := []map[listDirectoryRequest]directoryResponse{
+		{{DirectoryID: rootRemoteID, Page: 1, Size: 1}: {err: errQuarkAuthenticationExpired}},
+		{
+			{DirectoryID: rootRemoteID, Page: 1, Size: 1}: {nodes: []remoteNode{{
+				ID: "file", ParentID: rootRemoteID, Name: "file.txt", Kind: namespace.NodeKindFile,
+			}}},
+			{DirectoryID: rootRemoteID, Page: 2, Size: 1}: {err: errQuarkAuthenticationExpired},
+		},
+		{{DirectoryID: rootRemoteID, Page: 2, Size: 1}: {err: errQuarkAuthenticationExpired}},
+		{{DirectoryID: rootRemoteID, Page: 2, Size: 1}: {err: errQuarkAuthenticationExpired}},
+		{{DirectoryID: rootRemoteID, Page: 2, Size: 1}: {}},
+	}
+	provider := &fakeAuthorizationProvider{}
+	for _, script := range responses {
+		provider.authorizations = append(provider.authorizations, &fakePendingAuthorization{
+			id: "account-1", session: &fakeRefreshSession{client: &scriptedDirectoryClient{responses: script}},
+		})
+	}
+	runner, err := newRefreshRunner(store, provider, 1)
+	if err != nil {
+		t.Fatalf("newRefreshRunner() error: %v", err)
+	}
+	snapshot, err := runner.run(ctx, nil)
+	if err != nil {
+		t.Fatalf("run() error: %v", err)
+	}
+	if provider.calls != len(responses) {
+		t.Fatalf("authorization calls = %d, want %d", provider.calls, len(responses))
+	}
+	if _, exists := snapshot.Lookup("/file.txt"); !exists {
+		t.Fatal("published snapshot lost progress committed by an earlier session")
+	}
+}
+
+func TestRefreshRunnerRejectsAccountChangeDuringReauthorization(t *testing.T) {
+	ctx := context.Background()
+	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	defer store.close()
+
+	firstSession := &fakeRefreshSession{client: &scriptedDirectoryClient{responses: map[listDirectoryRequest]directoryResponse{
+		{DirectoryID: rootRemoteID, Page: 1, Size: 1}: {err: errQuarkAuthenticationExpired},
+	}}}
+	foreignSession := &fakeRefreshSession{client: &scriptedDirectoryClient{}}
+	provider := &fakeAuthorizationProvider{authorizations: []*fakePendingAuthorization{
+		{id: "account-1", session: firstSession},
+		{id: "account-2", session: foreignSession},
+	}}
+	runner, err := newRefreshRunner(store, provider, 1)
+	if err != nil {
+		t.Fatalf("newRefreshRunner() error: %v", err)
+	}
+	_, err = runner.run(ctx, nil)
+	if err == nil || !strings.Contains(err.Error(), "account changed during refresh") {
+		t.Fatalf("run() error = %v", err)
+	}
+	if !firstSession.closed {
+		t.Fatal("expired session was not closed")
+	}
+	if foreignSession.closed {
+		t.Fatal("session for the foreign account was unexpectedly opened")
+	}
+	if _, exists, err := store.stagingGeneration(ctx, "account-1"); err != nil || !exists {
+		t.Fatalf("account-1 staging generation = exists %t, error %v", exists, err)
+	}
+	if _, exists, err := store.stagingGeneration(ctx, "account-2"); err != nil || exists {
+		t.Fatalf("account-2 staging generation = exists %t, error %v", exists, err)
+	}
+	status, err := store.refreshStatus(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("refreshStatus() error: %v", err)
+	}
+	if status.State != RefreshStateFailed || !strings.Contains(status.LastError, "account changed during refresh") {
+		t.Fatalf("refreshStatus() = %+v", status)
+	}
+}
+
+func TestRefreshRunnerClosesSessionAndRecordsCanceledScan(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	defer store.close()
+
+	session := &fakeRefreshSession{client: &cancelingDirectoryClient{cancel: cancel}}
+	runner, err := newRefreshRunner(store, &fakeAuthorizationProvider{authorizations: []*fakePendingAuthorization{{
+		id: "account-1", session: session,
+	}}}, 1)
+	if err != nil {
+		t.Fatalf("newRefreshRunner() error: %v", err)
+	}
+	if _, err := runner.run(ctx, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run() error = %v", err)
+	}
+	if !session.closed {
+		t.Fatal("canceled refresh did not close its session")
+	}
+	status, err := store.refreshStatus(context.Background(), "account-1")
+	if err != nil {
+		t.Fatalf("refreshStatus() error: %v", err)
+	}
+	if status.State != RefreshStateFailed || !strings.Contains(status.LastError, context.Canceled.Error()) {
+		t.Fatalf("refreshStatus() = %+v", status)
 	}
 }
 

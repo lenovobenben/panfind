@@ -10,9 +10,12 @@ import (
 	"github.com/lenovobenben/panfind/internal/namespace"
 )
 
+const maxAuthenticationExpirationsWithoutProgress = 3
+
 type AuthorizationNotice struct {
-	AccountID    namespace.AccountID
-	PromptOpened bool
+	AccountID       namespace.AccountID
+	PromptOpened    bool
+	Reauthorization bool
 }
 
 type authorizationProvider interface {
@@ -95,65 +98,121 @@ func newRefreshRunner(store *store, authorization authorizationProvider, pageSiz
 	return &refreshRunner{store: store, authorization: authorization, pageSize: pageSize}, nil
 }
 
-// run obtains a one-scan desktop session, resumes the current account's
-// staging generation when present, and closes the session on every exit path.
+// run obtains short-lived desktop sessions until the current account's
+// staging generation is published or cannot make bounded progress.
 func (runner *refreshRunner) run(ctx context.Context, observe func(AuthorizationNotice)) (*namespace.Snapshot, error) {
-	authorization, err := runner.authorization.begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin Quark desktop authorization: %w", err)
-	}
-	if authorization == nil {
-		return nil, errors.New("Quark authorization provider returned no authorization")
-	}
-	accountID := authorization.accountID()
-	if accountID == "" {
-		return nil, errors.New("Quark desktop authorization has an empty account ID")
-	}
-	if observe != nil {
-		observe(AuthorizationNotice{AccountID: accountID, PromptOpened: authorization.promptIsOpen()})
-	}
-
-	session, err := authorization.wait(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("complete Quark desktop authorization: %w", err)
-	}
-	if session == nil {
-		return nil, errors.New("Quark desktop authorization returned no session")
-	}
-	defer session.close()
-
-	runID, exists, err := runner.store.stagingGeneration(ctx, accountID)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		runID, err = runner.store.beginGeneration(ctx, accountID)
+	var accountID namespace.AccountID
+	var runID int64
+	noProgressExpirations := 0
+	for {
+		authorization, err := runner.authorization.begin(ctx)
 		if err != nil {
-			return nil, err
+			return nil, runner.fail(ctx, runID, fmt.Errorf("begin Quark desktop authorization: %w", err))
+		}
+		if authorization == nil {
+			return nil, runner.fail(ctx, runID, errors.New("Quark authorization provider returned no authorization"))
+		}
+		candidateAccountID := authorization.accountID()
+		if candidateAccountID == "" {
+			return nil, runner.fail(ctx, runID, errors.New("Quark desktop authorization has an empty account ID"))
+		}
+		if accountID != "" && candidateAccountID != accountID {
+			return nil, runner.fail(ctx, runID, errors.New("Quark desktop account changed during refresh"))
+		}
+		if observe != nil {
+			observe(AuthorizationNotice{
+				AccountID: candidateAccountID, PromptOpened: authorization.promptIsOpen(), Reauthorization: runID != 0,
+			})
+		}
+
+		session, err := authorization.wait(ctx)
+		if err != nil {
+			return nil, runner.fail(ctx, runID, fmt.Errorf("complete Quark desktop authorization: %w", err))
+		}
+		if session == nil {
+			return nil, runner.fail(ctx, runID, errors.New("Quark desktop authorization returned no session"))
+		}
+		if runID == 0 {
+			accountID = candidateAccountID
+			runID, err = runner.resumeOrBeginGeneration(ctx, accountID)
+			if err != nil {
+				session.close()
+				return nil, err
+			}
+		}
+
+		before, err := runner.store.crawlProgress(ctx, runID)
+		if err != nil {
+			session.close()
+			return nil, runner.fail(ctx, runID, err)
+		}
+		snapshot, refreshErr := runner.runSession(ctx, runID, session)
+		if refreshErr == nil {
+			return snapshot, nil
+		}
+		if !errors.Is(refreshErr, errQuarkAuthenticationExpired) {
+			return nil, runner.fail(ctx, runID, refreshErr)
+		}
+		if err := runner.recordFailure(ctx, runID, refreshErr); err != nil {
+			return nil, errors.Join(refreshErr, err)
+		}
+		after, err := runner.store.crawlProgress(ctx, runID)
+		if err != nil {
+			return nil, runner.fail(ctx, runID, errors.Join(refreshErr, err))
+		}
+		if after == before {
+			noProgressExpirations++
+		} else {
+			noProgressExpirations = 0
+		}
+		if noProgressExpirations >= maxAuthenticationExpirationsWithoutProgress {
+			boundedErr := fmt.Errorf(
+				"Quark authentication expired in %d consecutive sessions without committed scan progress: %w",
+				noProgressExpirations, refreshErr,
+			)
+			return nil, runner.fail(ctx, runID, boundedErr)
 		}
 	}
+}
+
+func (runner *refreshRunner) resumeOrBeginGeneration(ctx context.Context, accountID namespace.AccountID) (int64, error) {
+	runID, exists, err := runner.store.stagingGeneration(ctx, accountID)
+	if err != nil {
+		return 0, err
+	}
+	if exists {
+		return runID, nil
+	}
+	return runner.store.beginGeneration(ctx, accountID)
+}
+
+func (runner *refreshRunner) runSession(ctx context.Context, runID int64, session refreshSession) (*namespace.Snapshot, error) {
+	defer session.close()
 	if err := runner.store.markGenerationAttempt(ctx, runID); err != nil {
 		return nil, err
 	}
 	client, err := session.directoryClient()
 	if err != nil {
-		return nil, runner.recordFailure(ctx, runID, fmt.Errorf("create authenticated Quark directory client: %w", err))
+		return nil, fmt.Errorf("create authenticated Quark directory client: %w", err)
 	}
 	scanner, err := newScanner(runner.store, client, runner.pageSize)
 	if err != nil {
-		return nil, runner.recordFailure(ctx, runID, err)
+		return nil, err
 	}
-	snapshot, err := scanner.run(ctx, runID)
-	if err != nil {
-		return nil, runner.recordFailure(ctx, runID, err)
-	}
-	return snapshot, nil
+	return scanner.run(ctx, runID)
 }
 
 func (runner *refreshRunner) recordFailure(ctx context.Context, runID int64, refreshErr error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	if err := runner.store.recordGenerationFailure(cleanupCtx, runID, refreshErr); err != nil {
+	return runner.store.recordGenerationFailure(cleanupCtx, runID, refreshErr)
+}
+
+func (runner *refreshRunner) fail(ctx context.Context, runID int64, refreshErr error) error {
+	if runID == 0 {
+		return refreshErr
+	}
+	if err := runner.recordFailure(ctx, runID, refreshErr); err != nil {
 		return errors.Join(refreshErr, err)
 	}
 	return refreshErr

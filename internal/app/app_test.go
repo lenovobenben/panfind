@@ -361,6 +361,30 @@ func TestRunQuarkRefreshJSON(t *testing.T) {
 	}
 }
 
+func TestRunQuarkRefreshExplainsReauthorization(t *testing.T) {
+	root := namespace.NodeKey{Provider: quark.ProviderID, Account: "account-1", ID: 1}
+	snapshot, err := namespace.NewSnapshot(7, root, []namespace.Node{{
+		Key: root, Name: "/", Kind: namespace.NodeKindDirectory,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeQuarkRefreshAdapter{
+		snapshot: snapshot,
+		notice: quark.AuthorizationNotice{
+			PromptOpened: true, Reauthorization: true,
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := runQuarkRefresh(context.Background(), adapter, false, &stdout, &stderr); code != ExitSuccess {
+		t.Fatalf("runQuarkRefresh() = %d, stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "session expired") || !strings.Contains(stderr.String(), "confirm the new request") {
+		t.Fatalf("reauthorization prompt = %q", stderr.String())
+	}
+}
+
 func TestRunRefreshRejectsUnsupportedProvider(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

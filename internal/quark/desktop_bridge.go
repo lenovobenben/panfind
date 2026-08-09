@@ -3,6 +3,8 @@ package quark
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/lenovobenben/panfind/internal/namespace"
 )
 
 const (
@@ -29,6 +33,7 @@ var (
 )
 
 type desktopBridgeInfo struct {
+	AccountID     namespace.AccountID
 	BridgeVersion string
 	ClientVersion string
 }
@@ -48,6 +53,7 @@ type wireDesktopInfo struct {
 	LoggedIn      *bool   `json:"isLogin"`
 	BridgeVersion *string `json:"version"`
 	ClientVersion *string `json:"quarkCloudVersion"`
+	UserID        *string `json:"wsUid"`
 }
 
 func discoverDesktopBridge(ctx context.Context, client *http.Client) (*desktopBridge, error) {
@@ -92,6 +98,7 @@ func discoverDesktopBridgeAt(ctx context.Context, client *http.Client, baseURLs 
 			client:  client,
 			baseURL: baseURL,
 			info: desktopBridgeInfo{
+				AccountID:     desktopAccountID(info.userID),
 				BridgeVersion: info.bridgeVersion,
 				ClientVersion: info.clientVersion,
 			},
@@ -107,6 +114,7 @@ type probedDesktopInfo struct {
 	loggedIn      bool
 	bridgeVersion string
 	clientVersion string
+	userID        string
 }
 
 func probeDesktopBridge(ctx context.Context, client *http.Client, baseURL *url.URL) (probedDesktopInfo, bool, error) {
@@ -170,11 +178,24 @@ func decodeDesktopInfo(reader io.Reader) (probedDesktopInfo, error) {
 	if response.Data.ClientVersion == nil || *response.Data.ClientVersion == "" {
 		return probedDesktopInfo{}, fmt.Errorf("%w: desktop_info is missing client version", errUnsupportedDesktopBridge)
 	}
+	if *response.Data.LoggedIn && (response.Data.UserID == nil || *response.Data.UserID == "") {
+		return probedDesktopInfo{}, fmt.Errorf("%w: desktop_info is missing account identity", errUnsupportedDesktopBridge)
+	}
+	userID := ""
+	if response.Data.UserID != nil {
+		userID = *response.Data.UserID
+	}
 	return probedDesktopInfo{
 		loggedIn:      *response.Data.LoggedIn,
 		bridgeVersion: *response.Data.BridgeVersion,
 		clientVersion: *response.Data.ClientVersion,
+		userID:        userID,
 	}, nil
+}
+
+func desktopAccountID(userID string) namespace.AccountID {
+	digest := sha256.Sum256([]byte(userID))
+	return namespace.AccountID("quark-" + hex.EncodeToString(digest[:]))
 }
 
 func parseDesktopBridgeURL(rawURL string) (*url.URL, error) {

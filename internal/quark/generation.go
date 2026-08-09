@@ -21,6 +21,25 @@ const (
 
 var errNoPublishedSnapshot = errors.New("no published Quark snapshot")
 
+func (s *store) stagingGeneration(ctx context.Context, accountID namespace.AccountID) (int64, bool, error) {
+	if accountID == "" {
+		return 0, false, errors.New("Quark account ID is empty")
+	}
+	var count int
+	var runID int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(MAX(run_id), 0)
+		FROM sync_runs
+		WHERE account_id = ? AND state = 'staging'
+	`, accountID).Scan(&count, &runID); err != nil {
+		return 0, false, fmt.Errorf("read Quark staging generation: %w", err)
+	}
+	if count > 1 {
+		return 0, false, fmt.Errorf("Quark account %q has %d staging generations", accountID, count)
+	}
+	return runID, count == 1, nil
+}
+
 func (s *store) beginGeneration(ctx context.Context, accountID namespace.AccountID) (int64, error) {
 	if accountID == "" {
 		return 0, errors.New("Quark account ID is empty")

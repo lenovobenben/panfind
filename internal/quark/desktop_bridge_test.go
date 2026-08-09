@@ -37,11 +37,14 @@ func TestDiscoverDesktopBridge(t *testing.T) {
 	if bridge.info.BridgeVersion != "2.5.40" || bridge.info.ClientVersion != "7.0.6.771" {
 		t.Fatalf("bridge info = %+v", bridge.info)
 	}
+	if bridge.info.AccountID != desktopAccountID("secret") || strings.Contains(string(bridge.info.AccountID), "secret") {
+		t.Fatalf("bridge account ID was not anonymized")
+	}
 }
 
 func TestDiscoverDesktopBridgeSkipsUnavailableAddress(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(writer, `{"success":true,"data":{"isLogin":true,"version":"bridge","quarkCloudVersion":"client"}}`)
+		_, _ = io.WriteString(writer, `{"success":true,"data":{"isLogin":true,"version":"bridge","quarkCloudVersion":"client","wsUid":"account"}}`)
 	}))
 	defer server.Close()
 
@@ -107,7 +110,8 @@ func TestDecodeDesktopInfoRejectsProtocolChanges(t *testing.T) {
 		{name: "missing login", body: `{"success":true,"data":{"version":"bridge","quarkCloudVersion":"client"}}`, want: "login state"},
 		{name: "missing bridge version", body: `{"success":true,"data":{"isLogin":true,"quarkCloudVersion":"client"}}`, want: "bridge version"},
 		{name: "missing client version", body: `{"success":true,"data":{"isLogin":true,"version":"bridge"}}`, want: "client version"},
-		{name: "trailing value", body: `{"success":true,"data":{"isLogin":true,"version":"bridge","quarkCloudVersion":"client"}} {}`, want: "trailing JSON value"},
+		{name: "missing account identity", body: `{"success":true,"data":{"isLogin":true,"version":"bridge","quarkCloudVersion":"client"}}`, want: "account identity"},
+		{name: "trailing value", body: `{"success":true,"data":{"isLogin":true,"version":"bridge","quarkCloudVersion":"client","wsUid":"account"}} {}`, want: "trailing JSON value"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -147,5 +151,18 @@ func TestParseDesktopBridgeURLRejectsNonLoopbackAddress(t *testing.T) {
 		if _, err := parseDesktopBridgeURL(rawURL); err == nil {
 			t.Errorf("parseDesktopBridgeURL(%q) succeeded", rawURL)
 		}
+	}
+}
+
+func TestDesktopAccountIDIsStableAndScoped(t *testing.T) {
+	first := desktopAccountID("account-one")
+	if first == "" || first != desktopAccountID("account-one") {
+		t.Fatalf("desktopAccountID() is not stable: %q", first)
+	}
+	if first == desktopAccountID("account-two") {
+		t.Fatal("different desktop accounts received the same internal ID")
+	}
+	if strings.Contains(string(first), "account-one") {
+		t.Fatal("internal account ID contains the source account identity")
 	}
 }

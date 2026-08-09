@@ -11,6 +11,7 @@ import (
 )
 
 type crawlPage struct {
+	AccountID   namespace.AccountID
 	DirectoryID int64
 	RemoteID    string
 	Number      int
@@ -30,10 +31,11 @@ func (s *store) nextCrawlPage(ctx context.Context, runID int64) (crawlPage, bool
 	}
 	defer tx.Rollback()
 
-	if _, err := stagingAccount(ctx, tx, runID); err != nil {
+	accountID, err := stagingAccount(ctx, tx, runID)
+	if err != nil {
 		return crawlPage{}, false, err
 	}
-	var page crawlPage
+	page := crawlPage{AccountID: accountID}
 	if err := tx.QueryRowContext(ctx, `
 		SELECT local_id, remote_id, next_page
 		FROM crawl_queue

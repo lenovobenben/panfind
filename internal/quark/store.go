@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const storeSchemaVersion = 1
+const storeSchemaVersion = 2
 
 var errUnsupportedStoreSchema = errors.New("unsupported Quark metadata store schema")
 
@@ -49,8 +49,10 @@ func (s *store) initialize(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read Quark metadata store schema version: %w", err)
 	}
-	switch version {
-	case 0:
+	if version > storeSchemaVersion {
+		return fmt.Errorf("%w: found version %d, supports version %d", errUnsupportedStoreSchema, version, storeSchemaVersion)
+	}
+	if version < 1 {
 		if _, err := tx.ExecContext(ctx, `
 			CREATE TABLE remote_ids(
 				local_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,13 +60,40 @@ func (s *store) initialize(ctx context.Context) error {
 				remote_id TEXT NOT NULL,
 				UNIQUE(account_id, remote_id)
 			);
-			PRAGMA user_version = 1;
 		`); err != nil {
 			return fmt.Errorf("create Quark metadata store schema: %w", err)
 		}
-	case storeSchemaVersion:
-	default:
-		return fmt.Errorf("%w: found version %d, support version %d", errUnsupportedStoreSchema, version, storeSchemaVersion)
+	}
+	if version < 2 {
+		if _, err := tx.ExecContext(ctx, `
+			CREATE TABLE sync_runs(
+				run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				account_id TEXT NOT NULL,
+				state TEXT NOT NULL CHECK(state IN ('staging', 'complete'))
+			);
+			CREATE TABLE nodes(
+				run_id INTEGER NOT NULL,
+				local_id INTEGER NOT NULL,
+				parent_id INTEGER NOT NULL,
+				name TEXT NOT NULL,
+				kind INTEGER NOT NULL CHECK(kind IN (1, 2)),
+				size TEXT NOT NULL,
+				modified_at TEXT,
+				created_at TEXT,
+				first_seen_at TEXT,
+				category INTEGER,
+				PRIMARY KEY(run_id, local_id)
+			);
+			CREATE TABLE published_generations(
+				account_id TEXT PRIMARY KEY,
+				run_id INTEGER NOT NULL UNIQUE
+			);
+		`); err != nil {
+			return fmt.Errorf("create Quark snapshot store schema: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
+		return fmt.Errorf("write Quark metadata store schema version: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

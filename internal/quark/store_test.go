@@ -97,7 +97,7 @@ func TestOpenStoreRejectsNewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 2"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 3"); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -112,5 +112,45 @@ func TestOpenStoreRejectsNewerSchema(t *testing.T) {
 	}
 	if !errors.Is(err, errUnsupportedStoreSchema) {
 		t.Fatalf("openStore() error = %v, want errUnsupportedStoreSchema", err)
+	}
+}
+
+func TestOpenStoreMigratesStableIDSchema(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "metadata.db")
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE remote_ids(
+			local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id TEXT NOT NULL,
+			remote_id TEXT NOT NULL,
+			UNIQUE(account_id, remote_id)
+		);
+		INSERT INTO remote_ids(account_id, remote_id) VALUES ('account-1', 'existing');
+		PRAGMA user_version = 1;
+	`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openStore(databasePath)
+	if err != nil {
+		t.Fatalf("openStore() migration error: %v", err)
+	}
+	defer store.close()
+	ids, err := store.resolveRemoteIDs(context.Background(), "account-1", []string{"existing"})
+	if err != nil {
+		t.Fatalf("resolveRemoteIDs() after migration: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != 1 {
+		t.Fatalf("stable ID changed during migration: %v", ids)
+	}
+	if _, err := store.beginGeneration(context.Background(), "account-1"); err != nil {
+		t.Fatalf("beginGeneration() after migration: %v", err)
 	}
 }

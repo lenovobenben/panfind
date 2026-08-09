@@ -326,12 +326,11 @@ Usage:
   panfind <root> [expression]   search cloud-drive metadata
   panfind query <root> [expression] explicit machine-friendly query form
   panfind watch <root> [expression] rerun a query after metadata changes
-  panfind refresh quark [--json] refresh the Quark snapshot through the desktop client
-  panfind accounts [baidu|quark] [--json] list discovered provider accounts
+  panfind accounts [baidu] [--json] list discovered provider accounts
   panfind explain <root> [expression] [--json] show parsed query AST
   panfind schema [--json]      show the supported query language
-  panfind status [baidu|quark] [--json] load provider snapshot status
-  panfind capabilities [baidu|quark] [--json] show provider capabilities
+  panfind status [baidu] [--json] load provider snapshot status
+  panfind capabilities [baidu] [--json] show provider capabilities
   panfind version              show version
   panfind help                 show this help
 
@@ -340,7 +339,11 @@ Account selection:
 
 Roots:
   baidu:/path reads the Baidu desktop metadata database.
-  quark:/path reads the last successfully published Quark snapshot.
+
+Source-disabled experimental code:
+  The Quark provider is present for review and development, but every user-facing
+  entrypoint is disabled by a source constant. It cannot be enabled by runtime
+  flags, environment variables, config files, or build tags.
 
 Supported expressions:
   -type f|d   -name PATTERN   -iname PATTERN   -size N[cwbkMG]
@@ -461,9 +464,14 @@ func runExplain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "panfind explain: missing query root")
 		return ExitUsage
 	}
-	if _, _, err := queryProvider(filtered[0]); err != nil {
+	providerName, _, err := queryProvider(filtered[0])
+	if err != nil {
 		fmt.Fprintf(stderr, "panfind explain: %v\n", err)
 		return ExitUsage
+	}
+	if providerName == "quark" && !enableQuarkProvider {
+		fmt.Fprintf(stderr, "panfind explain: %v\n", quarkProviderDisabledError())
+		return ExitDataSource
 	}
 
 	tokens, printfFormat, err := extractOutputAction(filtered[0], filtered[1:])

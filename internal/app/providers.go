@@ -33,6 +33,9 @@ func newProviderAdapter(name string) (provider.Adapter, error) {
 	case "baidu":
 		return baidu.New()
 	case "quark":
+		if !enableQuarkProvider {
+			return nil, quarkProviderDisabledError()
+		}
 		return quark.New()
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", name)
@@ -104,6 +107,10 @@ func runRefresh(ctx context.Context, args []string, stdout, stderr io.Writer) in
 			return ExitUsage
 		}
 		jsonOutput = true
+	}
+	if !enableQuarkProvider {
+		fmt.Fprintf(stderr, "panfind refresh: %v\n", quarkProviderDisabledError())
+		return ExitDataSource
 	}
 	adapter, err := quark.New()
 	if err != nil {

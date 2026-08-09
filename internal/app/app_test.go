@@ -98,19 +98,31 @@ func TestRunSchemaJSON(t *testing.T) {
 	}
 }
 
-func TestRunCapabilitiesQuarkJSON(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	code := Run([]string{"capabilities", "quark", "--json"}, &stdout, &stderr)
-	if code != ExitSuccess {
-		t.Fatalf("Run(capabilities quark) = %d, stderr=%q", code, stderr.String())
+func TestQuarkUserEntrypointsRequireSourceChange(t *testing.T) {
+	if enableQuarkProvider {
+		t.Fatal("Quark provider must be disabled in the checked-in source")
 	}
-	var capabilities provider.Capabilities
-	if err := json.Unmarshal(stdout.Bytes(), &capabilities); err != nil {
-		t.Fatal(err)
+	tests := [][]string{
+		{"capabilities", "quark", "--json"},
+		{"accounts", "quark", "--json"},
+		{"status", "quark", "--json"},
+		{"query", "quark:/", "-type", "f"},
+		{"watch", "quark:/", "-type", "f"},
+		{"explain", "quark:/", "-type", "f", "--json"},
+		{"refresh", "quark", "--json"},
 	}
-	if !capabilities.Size || !capabilities.CreatedAt || !capabilities.StableID || capabilities.Hash {
-		t.Fatalf("Quark capabilities = %+v", capabilities)
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run(args, &stdout, &stderr)
+			if code != ExitDataSource || !strings.Contains(stderr.String(), "disabled in source") {
+				t.Fatalf("Run(%q) = %d, stdout=%q, stderr=%q", args, code, stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("Run(%q) wrote stdout %q", args, stdout.String())
+			}
+		})
 	}
 }
 

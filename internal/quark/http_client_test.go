@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -190,6 +191,110 @@ func TestHTTPDirectoryClientRejectsHTTPError(t *testing.T) {
 	_, err = client.ListDirectory(context.Background(), listDirectoryRequest{DirectoryID: rootRemoteID, Page: 1, Size: 50})
 	if !errors.Is(err, errQuarkAuthenticationExpired) || strings.Contains(err.Error(), "not authenticated") {
 		t.Fatalf("ListDirectory() error = %v", err)
+	}
+}
+
+func TestHTTPDirectoryClientClassifiesTransientHTTPStatus(t *testing.T) {
+	for _, status := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooEarly,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+		599,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				if status == http.StatusTooManyRequests {
+					writer.Header().Set("Retry-After", "2")
+				}
+				writer.WriteHeader(status)
+			}))
+			defer server.Close()
+
+			client, err := newHTTPDirectoryClientAt(server.Client(), server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.ListDirectory(context.Background(), listDirectoryRequest{
+				DirectoryID: rootRemoteID, Page: 1, Size: 50,
+			})
+			if !errors.Is(err, errQuarkTransient) || errors.Is(err, errQuarkAuthenticationExpired) {
+				t.Fatalf("ListDirectory() error = %v", err)
+			}
+			var transient *transientDirectoryError
+			if !errors.As(err, &transient) {
+				t.Fatalf("ListDirectory() did not return transientDirectoryError: %v", err)
+			}
+			if status == http.StatusTooManyRequests && transient.retryAfter != 2*time.Second {
+				t.Fatalf("Retry-After = %s", transient.retryAfter)
+			}
+		})
+	}
+}
+
+func TestHTTPDirectoryClientDoesNotRetryPermanentHTTPStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	client, err := newHTTPDirectoryClientAt(server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ListDirectory(context.Background(), listDirectoryRequest{
+		DirectoryID: rootRemoteID, Page: 1, Size: 50,
+	})
+	if err == nil || errors.Is(err, errQuarkTransient) || errors.Is(err, errQuarkAuthenticationExpired) {
+		t.Fatalf("ListDirectory() error = %v", err)
+	}
+}
+
+func TestHTTPDirectoryClientClassifiesNetworkFailureAndCancellation(t *testing.T) {
+	client, err := newHTTPDirectoryClientAt(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, &net.DNSError{Err: "temporary timeout", IsTimeout: true, IsTemporary: true}
+	})}, directoryEndpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ListDirectory(context.Background(), listDirectoryRequest{
+		DirectoryID: rootRemoteID, Page: 1, Size: 50,
+	})
+	if !errors.Is(err, errQuarkTransient) {
+		t.Fatalf("network ListDirectory() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = client.ListDirectory(ctx, listDirectoryRequest{
+		DirectoryID: rootRemoteID, Page: 1, Size: 50,
+	})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, errQuarkTransient) {
+		t.Fatalf("canceled ListDirectory() error = %v", err)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, time.August, 9, 8, 0, 0, 0, time.UTC)
+	deadline := now.Add(12 * time.Second).Format(http.TimeFormat)
+	for _, test := range []struct {
+		value string
+		want  time.Duration
+		ok    bool
+	}{
+		{value: "7", want: 7 * time.Second, ok: true},
+		{value: deadline, want: 12 * time.Second, ok: true},
+		{value: now.Add(-time.Second).Format(http.TimeFormat), want: 0, ok: true},
+		{value: "-1"},
+		{value: "invalid"},
+	} {
+		got, ok := parseRetryAfter(test.value, now)
+		if got != test.want || ok != test.ok {
+			t.Errorf("parseRetryAfter(%q) = (%s, %t), want (%s, %t)", test.value, got, ok, test.want, test.ok)
+		}
+	}
+	if got, ok := parseRetryAfter("999999999999999999", now); !ok || got <= defaultDirectoryMaximumDelay {
+		t.Fatalf("parseRetryAfter(overflow) = (%s, %t)", got, ok)
 	}
 }
 

@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lenovobenben/panfind/internal/namespace"
@@ -82,11 +85,25 @@ func (client *httpDirectoryClient) ListDirectory(ctx context.Context, request li
 
 	response, err := client.client.Do(httpRequest)
 	if err != nil {
-		return nil, fmt.Errorf("send Quark directory request: %w", err)
+		requestErr := fmt.Errorf("send Quark directory request: %w", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if isTransientNetworkError(err) {
+			return nil, newTransientDirectoryError(requestErr, 0)
+		}
+		return nil, requestErr
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusUnauthorized {
 		return nil, errQuarkAuthenticationExpired
+	}
+	if isTransientHTTPStatus(response.StatusCode) {
+		retryAfter, _ := parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
+		return nil, newTransientDirectoryError(
+			fmt.Errorf("Quark directory request returned HTTP status %d", response.StatusCode),
+			retryAfter,
+		)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("Quark directory request returned HTTP status %d", response.StatusCode)
@@ -94,12 +111,63 @@ func (client *httpDirectoryClient) ListDirectory(ctx context.Context, request li
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("read Quark directory response: %w", err)
+		readErr := fmt.Errorf("read Quark directory response: %w", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if isTransientNetworkError(err) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, newTransientDirectoryError(readErr, 0)
+		}
+		return nil, readErr
 	}
 	if len(body) > maxResponseSize {
 		return nil, fmt.Errorf("Quark directory response exceeds %d bytes", maxResponseSize)
 	}
 	return decodeDirectoryResponse(bytes.NewReader(body))
+}
+
+func isTransientHTTPStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooEarly ||
+		status == http.StatusTooManyRequests ||
+		(status >= http.StatusInternalServerError && status <= 599)
+}
+
+func isTransientNetworkError(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary()) {
+		return true
+	}
+	var operationErr *net.OpError
+	return errors.As(err, &operationErr)
+}
+
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds < 0 {
+			return 0, false
+		}
+		if seconds > math.MaxInt64/int64(time.Second) {
+			return time.Duration(math.MaxInt64), true
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	deadline, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	delay := deadline.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	return delay, true
 }
 
 type wireDirectoryResponse struct {

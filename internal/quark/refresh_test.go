@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lenovobenben/panfind/internal/namespace"
 )
@@ -108,6 +109,45 @@ func TestRefreshRunnerAuthenticatesScansAndClosesSession(t *testing.T) {
 	}
 	if _, exists, err := store.stagingGeneration(ctx, "account-1"); err != nil || exists {
 		t.Fatalf("stagingGeneration() after publish = exists %t, error %v", exists, err)
+	}
+}
+
+func TestRefreshRunnerRetriesTransientPageWithoutReauthorization(t *testing.T) {
+	ctx := context.Background()
+	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	defer store.close()
+
+	client := &sequenceDirectoryClient{responses: []retryResponse{
+		{err: newTransientDirectoryError(errors.New("temporary timeout"), 0)},
+		{},
+	}}
+	session := &fakeRefreshSession{client: client}
+	provider := &fakeAuthorizationProvider{authorizations: []*fakePendingAuthorization{{
+		id: "account-1", session: session,
+	}}}
+	runner, err := newRefreshRunner(store, provider, 2)
+	if err != nil {
+		t.Fatalf("newRefreshRunner() error: %v", err)
+	}
+	var sleeps []time.Duration
+	runner.retryPolicy.Sleep = func(_ context.Context, delay time.Duration) error {
+		sleeps = append(sleeps, delay)
+		return nil
+	}
+	snapshot, err := runner.run(ctx, nil)
+	if err != nil {
+		t.Fatalf("run() error: %v", err)
+	}
+	if snapshot.Generation() == 0 || provider.calls != 1 || client.calls != 2 ||
+		len(sleeps) != 1 || sleeps[0] != defaultDirectoryInitialDelay {
+		t.Fatalf("generation = %d, authorizations = %d, requests = %d, sleeps = %v",
+			snapshot.Generation(), provider.calls, client.calls, sleeps)
+	}
+	if !session.closed {
+		t.Fatal("refresh did not close its session")
 	}
 }
 

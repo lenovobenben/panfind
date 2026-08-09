@@ -41,6 +41,7 @@ type refreshRunner struct {
 	store         *store
 	authorization authorizationProvider
 	pageSize      int
+	retryPolicy   directoryRetryPolicy
 }
 
 func newDesktopAuthorizationProvider(client *http.Client) (*desktopAuthorizationProvider, error) {
@@ -95,7 +96,9 @@ func newRefreshRunner(store *store, authorization authorizationProvider, pageSiz
 	if pageSize <= 0 {
 		pageSize = defaultPageSize
 	}
-	return &refreshRunner{store: store, authorization: authorization, pageSize: pageSize}, nil
+	return &refreshRunner{
+		store: store, authorization: authorization, pageSize: pageSize, retryPolicy: defaultDirectoryRetryPolicy(),
+	}, nil
 }
 
 // run obtains short-lived desktop sessions until the current account's
@@ -195,7 +198,11 @@ func (runner *refreshRunner) runSession(ctx context.Context, runID int64, sessio
 	if err != nil {
 		return nil, fmt.Errorf("create authenticated Quark directory client: %w", err)
 	}
-	scanner, err := newScanner(runner.store, client, runner.pageSize)
+	retryingClient, err := newRetryingDirectoryClient(client, runner.retryPolicy)
+	if err != nil {
+		return nil, err
+	}
+	scanner, err := newScanner(runner.store, retryingClient, runner.pageSize)
 	if err != nil {
 		return nil, err
 	}

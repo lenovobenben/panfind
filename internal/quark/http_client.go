@@ -20,6 +20,8 @@ const (
 	maxResponseSize   = 16 << 20
 )
 
+var errQuarkAuthenticationExpired = errors.New("Quark authentication expired")
+
 type httpDirectoryClient struct {
 	client   *http.Client
 	endpoint *url.URL
@@ -74,12 +76,18 @@ func (client *httpDirectoryClient) ListDirectory(ctx context.Context, request li
 		return nil, fmt.Errorf("create Quark directory request: %w", err)
 	}
 	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("Origin", quarkDirectoryOrigin)
+	httpRequest.Header.Set("Referer", quarkDirectoryReferer)
+	httpRequest.Header.Set("User-Agent", quarkWebUserAgent)
 
 	response, err := client.client.Do(httpRequest)
 	if err != nil {
 		return nil, fmt.Errorf("send Quark directory request: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized {
+		return nil, errQuarkAuthenticationExpired
+	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("Quark directory request returned HTTP status %d", response.StatusCode)
 	}

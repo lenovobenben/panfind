@@ -3,6 +3,7 @@ package quark
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -46,6 +47,12 @@ func TestHTTPDirectoryClient(t *testing.T) {
 		}
 		if request.Header.Get("Accept") != "application/json" {
 			t.Errorf("Accept = %q", request.Header.Get("Accept"))
+		}
+		if request.Header.Get("Origin") != quarkDirectoryOrigin || request.Header.Get("Referer") != quarkDirectoryReferer {
+			t.Errorf("directory request origin headers are incorrect")
+		}
+		if request.Header.Get("User-Agent") != quarkWebUserAgent {
+			t.Errorf("User-Agent = %q", request.Header.Get("User-Agent"))
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		if _, err := writer.Write(fixture); err != nil {
@@ -181,7 +188,7 @@ func TestHTTPDirectoryClientRejectsHTTPError(t *testing.T) {
 		t.Fatalf("newHTTPDirectoryClientAt() error: %v", err)
 	}
 	_, err = client.ListDirectory(context.Background(), listDirectoryRequest{DirectoryID: rootRemoteID, Page: 1, Size: 50})
-	if err == nil || !strings.Contains(err.Error(), "HTTP status 401") || strings.Contains(err.Error(), "not authenticated") {
+	if !errors.Is(err, errQuarkAuthenticationExpired) || strings.Contains(err.Error(), "not authenticated") {
 		t.Fatalf("ListDirectory() error = %v", err)
 	}
 }

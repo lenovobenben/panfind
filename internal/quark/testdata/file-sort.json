@@ -1,0 +1,40 @@
+{
+  "status": 200,
+  "code": 0,
+  "message": "OK",
+  "timestamp": 1700000000000,
+  "metadata": {"synthetic": true},
+  "data": {
+    "list": [
+      {
+        "fid": "synthetic-directory-id",
+        "pdir_fid": "0",
+        "file_name": "shows",
+        "file_type": 0,
+        "dir": true,
+        "size": 0,
+        "created_at": 1700000000123,
+        "updated_at": 1700000000456,
+        "category": 0,
+        "format_type": "",
+        "status": 1,
+        "synthetic_future_field": {"accepted": true}
+      },
+      {
+        "fid": "synthetic-file-id",
+        "pdir_fid": "0",
+        "file_name": "example.pdf",
+        "file_type": 1,
+        "dir": false,
+        "size": 3920473,
+        "created_at": 1700000000789,
+        "updated_at": 1700000000999,
+        "category": 4,
+        "format_type": "application/pdf",
+        "status": 1
+      }
+    ],
+    "last_view_list": [],
+    "recent_file_list": []
+  }
+}

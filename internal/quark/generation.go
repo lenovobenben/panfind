@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lenovobenben/panfind/internal/namespace"
@@ -15,6 +16,7 @@ import (
 const (
 	ProviderID      namespace.ProviderID = "quark-remote"
 	syntheticRootID int64                = math.MinInt64
+	rootRemoteID                         = "0"
 )
 
 var errNoPublishedSnapshot = errors.New("no published Quark snapshot")
@@ -47,65 +49,17 @@ func (s *store) beginGeneration(ctx context.Context, accountID namespace.Account
 	`, runID, syntheticRootID, namespace.NodeKindDirectory); err != nil {
 		return 0, fmt.Errorf("create Quark generation root: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO crawl_queue(run_id, local_id, remote_id, next_page, state)
+		VALUES (?, ?, ?, 1, 'pending')
+	`, runID, syntheticRootID, rootRemoteID); err != nil {
+		return 0, fmt.Errorf("queue Quark generation root: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit Quark staging generation: %w", err)
 	}
 	return runID, nil
-}
-
-// stageNodes persists one complete response page. Rewriting a node in the same
-// generation is safe, which allows a page to be retried after an interruption.
-func (s *store) stageNodes(ctx context.Context, runID int64, nodes []namespace.Node) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin Quark staging transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	accountID, err := stagingAccount(ctx, tx, runID)
-	if err != nil {
-		return err
-	}
-	for _, node := range nodes {
-		if err := validateStagedNode(accountID, node); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO nodes(
-				run_id, local_id, parent_id, name, kind, size,
-				modified_at, created_at, first_seen_at, category
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(run_id, local_id) DO UPDATE SET
-				parent_id = excluded.parent_id,
-				name = excluded.name,
-				kind = excluded.kind,
-				size = excluded.size,
-				modified_at = excluded.modified_at,
-				created_at = excluded.created_at,
-				first_seen_at = excluded.first_seen_at,
-				category = excluded.category
-		`,
-			runID,
-			node.Key.ID,
-			node.Parent.ID,
-			node.Name,
-			node.Kind,
-			strconv.FormatUint(node.Size, 10),
-			formatTime(node.ModifiedAt),
-			formatTime(node.CreatedAt),
-			formatTime(node.FirstSeenAt),
-			node.Category,
-		); err != nil {
-			return fmt.Errorf("stage Quark node %d: %w", node.Key.ID, err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit Quark staging transaction: %w", err)
-	}
-	return nil
 }
 
 func (s *store) publishGeneration(ctx context.Context, runID int64) (*namespace.Snapshot, error) {
@@ -117,6 +71,9 @@ func (s *store) publishGeneration(ctx context.Context, runID int64) (*namespace.
 
 	accountID, err := stagingAccount(ctx, tx, runID)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireCompletedCrawl(ctx, tx, runID); err != nil {
 		return nil, err
 	}
 	nodes, err := readGeneration(ctx, tx, runID, accountID)
@@ -217,6 +174,9 @@ func validateStagedNode(accountID namespace.AccountID, node namespace.Node) erro
 	}
 	if node.Kind != namespace.NodeKindFile && node.Kind != namespace.NodeKindDirectory {
 		return fmt.Errorf("Quark node %d has invalid kind %q", node.Key.ID, node.Kind)
+	}
+	if node.Name == "" || node.Name == "." || node.Name == ".." || strings.Contains(node.Name, "/") || strings.ContainsRune(node.Name, '\x00') {
+		return fmt.Errorf("Quark node %d has invalid name %q", node.Key.ID, node.Name)
 	}
 	if node.Hash != nil || node.AddedAt != nil {
 		return fmt.Errorf("Quark node %d contains unsupported metadata", node.Key.ID)

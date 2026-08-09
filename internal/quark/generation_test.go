@@ -31,14 +31,21 @@ func TestStorePublishesOnlyCompleteGenerations(t *testing.T) {
 	}
 	modifiedAt := time.Unix(1_700_000_001, 123).UTC()
 	category := int32(1)
-	if err := store.stageNodes(ctx, firstRun, []namespace.Node{
-		{
+	rootPage := mustNextCrawlPage(t, store, firstRun)
+	if err := store.commitCrawlPage(ctx, firstRun, rootPage, []crawledNode{
+		{RemoteID: "shows", Node: namespace.Node{
 			Key:    quarkKey("account-1", ids[0]),
 			Parent: root,
 			Name:   "shows",
 			Kind:   namespace.NodeKindDirectory,
-		},
-		{
+		}},
+	}, true); err != nil {
+		store.close()
+		t.Fatalf("commit first root page: %v", err)
+	}
+	showsPage := mustNextCrawlPage(t, store, firstRun)
+	if err := store.commitCrawlPage(ctx, firstRun, showsPage, []crawledNode{
+		{RemoteID: "episode", Node: namespace.Node{
 			Key:        quarkKey("account-1", ids[1]),
 			Parent:     quarkKey("account-1", ids[0]),
 			Name:       "episode.mkv",
@@ -46,10 +53,10 @@ func TestStorePublishesOnlyCompleteGenerations(t *testing.T) {
 			Size:       1<<63 + 7,
 			ModifiedAt: &modifiedAt,
 			Category:   &category,
-		},
-	}); err != nil {
+		}},
+	}, true); err != nil {
 		store.close()
-		t.Fatalf("stage first generation: %v", err)
+		t.Fatalf("commit shows page: %v", err)
 	}
 	first, err := store.publishGeneration(ctx, firstRun)
 	if err != nil {
@@ -63,19 +70,9 @@ func TestStorePublishesOnlyCompleteGenerations(t *testing.T) {
 		store.close()
 		t.Fatalf("begin second generation: %v", err)
 	}
-	if err := store.stageNodes(ctx, secondRun, []namespace.Node{{
-		Key:    quarkKey("account-1", ids[3]),
-		Parent: quarkKey("account-1", ids[2]),
-		Name:   "replacement.pdf",
-		Kind:   namespace.NodeKindFile,
-		Size:   42,
-	}}); err != nil {
-		store.close()
-		t.Fatalf("stage incomplete generation: %v", err)
-	}
 	if _, err := store.publishGeneration(ctx, secondRun); err == nil {
 		store.close()
-		t.Fatal("publishGeneration() accepted a generation with a missing parent")
+		t.Fatal("publishGeneration() accepted an incomplete crawl queue")
 	}
 
 	published, err := store.loadPublishedSnapshot(ctx, "account-1", 99)
@@ -102,13 +99,28 @@ func TestStorePublishesOnlyCompleteGenerations(t *testing.T) {
 	}
 	defer reopened.close()
 
-	if err := reopened.stageNodes(ctx, secondRun, []namespace.Node{{
-		Key:    quarkKey("account-1", ids[2]),
-		Parent: root,
-		Name:   "documents",
-		Kind:   namespace.NodeKindDirectory,
-	}}); err != nil {
-		t.Fatalf("resume incomplete generation: %v", err)
+	secondRootPage := mustNextCrawlPage(t, reopened, secondRun)
+	if err := reopened.commitCrawlPage(ctx, secondRun, secondRootPage, []crawledNode{
+		{RemoteID: "replacement-parent", Node: namespace.Node{
+			Key:    quarkKey("account-1", ids[2]),
+			Parent: root,
+			Name:   "documents",
+			Kind:   namespace.NodeKindDirectory,
+		}},
+	}, true); err != nil {
+		t.Fatalf("resume root directory: %v", err)
+	}
+	documentsPage := mustNextCrawlPage(t, reopened, secondRun)
+	if err := reopened.commitCrawlPage(ctx, secondRun, documentsPage, []crawledNode{
+		{RemoteID: "replacement", Node: namespace.Node{
+			Key:    quarkKey("account-1", ids[3]),
+			Parent: quarkKey("account-1", ids[2]),
+			Name:   "replacement.pdf",
+			Kind:   namespace.NodeKindFile,
+			Size:   42,
+		}},
+	}, true); err != nil {
+		t.Fatalf("resume documents directory: %v", err)
 	}
 	if _, err := reopened.publishGeneration(ctx, secondRun); err != nil {
 		t.Fatalf("publish resumed generation: %v", err)
@@ -142,7 +154,7 @@ func TestStoreDoesNotExposeStagingGeneration(t *testing.T) {
 	}
 }
 
-func TestStageNodesRejectsAnotherAccount(t *testing.T) {
+func TestCommitCrawlPageRejectsAnotherAccount(t *testing.T) {
 	ctx := context.Background()
 	store, err := openStore(filepath.Join(t.TempDir(), "metadata.db"))
 	if err != nil {
@@ -154,19 +166,35 @@ func TestStageNodesRejectsAnotherAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("beginGeneration() error: %v", err)
 	}
-	err = store.stageNodes(ctx, runID, []namespace.Node{{
-		Key:    quarkKey("account-2", 1),
-		Parent: quarkKey("account-2", syntheticRootID),
-		Name:   "foreign",
-		Kind:   namespace.NodeKindDirectory,
-	}})
+	page := mustNextCrawlPage(t, store, runID)
+	err = store.commitCrawlPage(ctx, runID, page, []crawledNode{{
+		RemoteID: "foreign",
+		Node: namespace.Node{
+			Key:    quarkKey("account-2", 1),
+			Parent: quarkKey("account-2", syntheticRootID),
+			Name:   "foreign",
+			Kind:   namespace.NodeKindDirectory,
+		},
+	}}, true)
 	if err == nil {
-		t.Fatal("stageNodes() accepted a node from another account")
+		t.Fatal("commitCrawlPage() accepted a node from another account")
 	}
 }
 
 func quarkKey(accountID namespace.AccountID, id int64) namespace.NodeKey {
 	return namespace.NodeKey{Provider: ProviderID, Account: accountID, ID: id}
+}
+
+func mustNextCrawlPage(t *testing.T, store *store, runID int64) crawlPage {
+	t.Helper()
+	page, exists, err := store.nextCrawlPage(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("nextCrawlPage() error: %v", err)
+	}
+	if !exists {
+		t.Fatal("nextCrawlPage() returned no page")
+	}
+	return page
 }
 
 func assertSnapshotFile(t *testing.T, snapshot *namespace.Snapshot, path string, size uint64, modifiedAt time.Time) {

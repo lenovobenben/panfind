@@ -58,6 +58,51 @@ func TestAdapterRefreshDiscoverAndLoad(t *testing.T) {
 	if _, exists := loaded.Lookup("/document.pdf"); !exists {
 		t.Fatal("loaded snapshot does not contain document")
 	}
+	status, err := adapter.RefreshStatus(ctx, accounts[0])
+	if err != nil {
+		t.Fatalf("RefreshStatus() error: %v", err)
+	}
+	if status.State != RefreshStateReady || status.PublishedGeneration != int64(snapshot.Generation()) ||
+		status.SnapshotUpdatedAt == nil {
+		t.Fatalf("RefreshStatus() = %+v", status)
+	}
+}
+
+func TestAdapterDiscoversAccountWithFailedStagingRefresh(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "metadata.db")
+	store, err := openStore(databasePath)
+	if err != nil {
+		t.Fatalf("openStore() error: %v", err)
+	}
+	runID, err := store.beginGeneration(ctx, "account-1")
+	if err != nil {
+		store.close()
+		t.Fatalf("beginGeneration() error: %v", err)
+	}
+	if err := store.recordGenerationFailure(ctx, runID, errors.New("temporary failure")); err != nil {
+		store.close()
+		t.Fatalf("recordGenerationFailure() error: %v", err)
+	}
+	if err := store.close(); err != nil {
+		t.Fatalf("close() error: %v", err)
+	}
+
+	adapter := newAdapterAt(databasePath, nil)
+	accounts, err := adapter.DiscoverAccounts(ctx)
+	if err != nil {
+		t.Fatalf("DiscoverAccounts() error: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].ID != "account-1" {
+		t.Fatalf("DiscoverAccounts() = %+v", accounts)
+	}
+	status, err := adapter.RefreshStatus(ctx, accounts[0])
+	if err != nil {
+		t.Fatalf("RefreshStatus() error: %v", err)
+	}
+	if status.State != RefreshStateFailed || status.StagingGeneration != runID || status.LastError != "temporary failure" {
+		t.Fatalf("RefreshStatus() = %+v", status)
+	}
 }
 
 func TestAdapterDiscoverAccountsDoesNotCreateDatabase(t *testing.T) {

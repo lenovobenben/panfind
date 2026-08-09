@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lenovobenben/panfind/internal/namespace"
@@ -132,6 +133,17 @@ func TestRefreshRunnerResumesCheckpointAfterAuthenticationExpires(t *testing.T) 
 	if page.Number != 2 {
 		t.Fatalf("checkpoint after authentication expiry = %+v", page)
 	}
+	failedStatus, err := store.refreshStatus(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("refreshStatus() after failure error: %v", err)
+	}
+	if failedStatus.State != RefreshStateFailed || failedStatus.StagingGeneration != runID ||
+		failedStatus.StartedAt == nil || failedStatus.LastAttemptAt == nil || failedStatus.LastProgressAt == nil ||
+		!strings.Contains(failedStatus.LastError, errQuarkAuthenticationExpired.Error()) ||
+		failedStatus.DirectoriesDiscovered != 1 || failedStatus.DirectoriesCompleted != 0 ||
+		failedStatus.DirectoriesPending != 1 || failedStatus.StagedNodes != 1 {
+		t.Fatalf("refreshStatus() after failure = %+v", failedStatus)
+	}
 
 	secondClient := &scriptedDirectoryClient{responses: map[listDirectoryRequest]directoryResponse{
 		{DirectoryID: rootRemoteID, Page: 2, Size: 1}: {},
@@ -155,6 +167,14 @@ func TestRefreshRunnerResumesCheckpointAfterAuthenticationExpires(t *testing.T) 
 	}
 	if !secondSession.closed {
 		t.Fatal("resumed refresh did not close its session")
+	}
+	readyStatus, err := store.refreshStatus(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("refreshStatus() after publish error: %v", err)
+	}
+	if readyStatus.State != RefreshStateReady || readyStatus.PublishedGeneration != runID ||
+		readyStatus.SnapshotUpdatedAt == nil || readyStatus.StagingGeneration != 0 || readyStatus.LastError != "" {
+		t.Fatalf("refreshStatus() after publish = %+v", readyStatus)
 	}
 }
 

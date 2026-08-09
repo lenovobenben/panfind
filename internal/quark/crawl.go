@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/lenovobenben/panfind/internal/namespace"
 )
@@ -117,6 +118,14 @@ func (s *store) commitCrawlPage(ctx context.Context, runID int64, page crawlPage
 		`, runID, page.DirectoryID); err != nil {
 			return fmt.Errorf("advance Quark crawl directory %d: %w", page.DirectoryID, err)
 		}
+	}
+	progressAt := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE sync_runs
+		SET last_progress_at = ?, last_error = NULL
+		WHERE run_id = ? AND state = 'staging'
+	`, formatTime(&progressAt), runID); err != nil {
+		return fmt.Errorf("update Quark crawl progress: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

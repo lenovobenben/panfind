@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/lenovobenben/panfind/internal/namespace"
 	"github.com/lenovobenben/panfind/internal/output"
 	"github.com/lenovobenben/panfind/internal/provider"
+	"github.com/lenovobenben/panfind/internal/quark"
 	"github.com/lenovobenben/panfind/internal/query"
 	"github.com/lenovobenben/panfind/internal/syncer"
 	"github.com/lenovobenben/panfind/internal/version"
@@ -532,12 +534,23 @@ func runCapabilities(args []string, stdout, stderr io.Writer) int {
 }
 
 type accountStatus struct {
-	Provider    string `json:"provider"`
-	Account     string `json:"account"`
-	Generation  uint64 `json:"generation"`
-	Nodes       int    `json:"nodes"`
-	Files       int    `json:"files"`
-	Directories int    `json:"directories"`
+	Provider              string     `json:"provider"`
+	Account               string     `json:"account"`
+	Generation            uint64     `json:"generation"`
+	Nodes                 int        `json:"nodes"`
+	Files                 int        `json:"files"`
+	Directories           int        `json:"directories"`
+	RefreshState          string     `json:"refresh_state,omitempty"`
+	RefreshRun            int64      `json:"refresh_run,omitempty"`
+	SnapshotUpdatedAt     *time.Time `json:"snapshot_updated_at,omitempty"`
+	RefreshStartedAt      *time.Time `json:"refresh_started_at,omitempty"`
+	LastAttemptAt         *time.Time `json:"last_attempt_at,omitempty"`
+	LastProgressAt        *time.Time `json:"last_progress_at,omitempty"`
+	LastError             string     `json:"last_error,omitempty"`
+	DirectoriesDiscovered *int       `json:"directories_discovered,omitempty"`
+	DirectoriesCompleted  *int       `json:"directories_completed,omitempty"`
+	DirectoriesPending    *int       `json:"directories_pending,omitempty"`
+	StagedNodes           *int       `json:"staged_nodes,omitempty"`
 }
 
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -552,28 +565,10 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "panfind status: %v\n", err)
 		return ExitDataSource
 	}
-	accounts, err := adapter.DiscoverAccounts(ctx)
+	statuses, err := loadAccountStatuses(ctx, adapter)
 	if err != nil {
 		fmt.Fprintf(stderr, "panfind status: %v\n", err)
 		return ExitDataSource
-	}
-
-	statuses := make([]accountStatus, 0, len(accounts))
-	for _, account := range accounts {
-		snapshot, err := adapter.LoadSnapshot(ctx, account, 1)
-		if err != nil {
-			fmt.Fprintf(stderr, "panfind status: load account %q: %v\n", account.ID, err)
-			return ExitDataSource
-		}
-		stats := snapshot.DescendantStats()
-		statuses = append(statuses, accountStatus{
-			Provider:    string(account.Provider),
-			Account:     string(account.ID),
-			Generation:  snapshot.Generation(),
-			Nodes:       stats.Nodes,
-			Files:       stats.Files,
-			Directories: stats.Directories,
-		})
 	}
 
 	if jsonOutput {
@@ -588,8 +583,85 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return ExitSuccess
 	}
 	for _, status := range statuses {
-		fmt.Fprintf(stdout, "provider=%s account=%s generation=%d nodes=%d files=%d directories=%d\n",
+		fmt.Fprintf(stdout, "provider=%s account=%s generation=%d nodes=%d files=%d directories=%d",
 			status.Provider, status.Account, status.Generation, status.Nodes, status.Files, status.Directories)
+		if status.RefreshState != "" {
+			fmt.Fprintf(stdout, " refresh_state=%s", status.RefreshState)
+			if status.SnapshotUpdatedAt != nil {
+				fmt.Fprintf(stdout, " snapshot_updated_at=%s", status.SnapshotUpdatedAt.Format(time.RFC3339Nano))
+			}
+			if status.RefreshRun != 0 {
+				fmt.Fprintf(stdout, " refresh_run=%d", status.RefreshRun)
+			}
+			if status.RefreshStartedAt != nil {
+				fmt.Fprintf(stdout, " refresh_started_at=%s", status.RefreshStartedAt.Format(time.RFC3339Nano))
+			}
+			if status.LastAttemptAt != nil {
+				fmt.Fprintf(stdout, " last_attempt_at=%s", status.LastAttemptAt.Format(time.RFC3339Nano))
+			}
+			if status.LastProgressAt != nil {
+				fmt.Fprintf(stdout, " last_progress_at=%s", status.LastProgressAt.Format(time.RFC3339Nano))
+			}
+			if status.LastError != "" {
+				fmt.Fprintf(stdout, " last_error=%q", status.LastError)
+			}
+			if status.RefreshRun != 0 {
+				fmt.Fprintf(stdout, " directories_discovered=%d directories_completed=%d directories_pending=%d staged_nodes=%d",
+					*status.DirectoriesDiscovered, *status.DirectoriesCompleted, *status.DirectoriesPending, *status.StagedNodes)
+			}
+		}
+		fmt.Fprintln(stdout)
 	}
 	return ExitSuccess
+}
+
+func loadAccountStatuses(ctx context.Context, adapter provider.Adapter) ([]accountStatus, error) {
+	accounts, err := adapter.DiscoverAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	statuses := make([]accountStatus, 0, len(accounts))
+	for _, account := range accounts {
+		status := accountStatus{Provider: string(account.Provider), Account: string(account.ID)}
+		generation := uint64(1)
+		if refreshAdapter, ok := adapter.(quarkRefreshStatusAdapter); ok {
+			refreshStatus, err := refreshAdapter.RefreshStatus(ctx, account)
+			if err != nil {
+				return nil, fmt.Errorf("load account %q refresh status: %w", account.ID, err)
+			}
+			status.applyQuarkRefreshStatus(refreshStatus)
+			if refreshStatus.PublishedGeneration == 0 {
+				statuses = append(statuses, status)
+				continue
+			}
+			generation = uint64(refreshStatus.PublishedGeneration)
+		}
+		snapshot, err := adapter.LoadSnapshot(ctx, account, generation)
+		if err != nil {
+			return nil, fmt.Errorf("load account %q: %w", account.ID, err)
+		}
+		stats := snapshot.DescendantStats()
+		status.Generation = snapshot.Generation()
+		status.Nodes = stats.Nodes
+		status.Files = stats.Files
+		status.Directories = stats.Directories
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
+}
+
+func (status *accountStatus) applyQuarkRefreshStatus(refresh quark.RefreshStatus) {
+	status.RefreshState = string(refresh.State)
+	status.SnapshotUpdatedAt = refresh.SnapshotUpdatedAt
+	status.RefreshRun = refresh.StagingGeneration
+	status.RefreshStartedAt = refresh.StartedAt
+	status.LastAttemptAt = refresh.LastAttemptAt
+	status.LastProgressAt = refresh.LastProgressAt
+	status.LastError = refresh.LastError
+	if refresh.StagingGeneration != 0 {
+		status.DirectoriesDiscovered = &refresh.DirectoriesDiscovered
+		status.DirectoriesCompleted = &refresh.DirectoriesCompleted
+		status.DirectoriesPending = &refresh.DirectoriesPending
+		status.StagedNodes = &refresh.StagedNodes
+	}
 }

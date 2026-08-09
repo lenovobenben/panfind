@@ -126,7 +126,7 @@ Skill 的 Windows 脚本负责安全调用 PanFind、解析 JSON Lines、汇总�
 - 提供可被 Codex 发现的仓库级自然语言搜索 Skill。
 - 通过夸克桌面客户端本机桥接建立一次刷新专用的纯内存会话；
 - 递归扫描夸克远端文件树，以检查点恢复和原子发布方式维护本地快照；
-- 支持 `refresh quark`、`quark:/` 查询以及夸克账号、状态和能力输出；
+- 支持 `refresh quark`、`quark:/` 查询以及夸克账号、状态和能力输出；`status quark` 会报告最近成功生成时间、可恢复扫描进度和最近错误；
 - 百度和夸克只在 Provider Adapter 输出统一 Snapshot 时汇合，认证与持久化实现互不依赖。
 
 ## 安装和运行
@@ -149,6 +149,7 @@ go build -trimpath -o bin/panfind.exe ./cmd/panfind
 .\panfind-windows-amd64.exe baidu:/ -type f -iname "*.pdf" --json
 .\panfind-windows-amd64.exe refresh quark
 .\panfind-windows-amd64.exe status quark
+.\panfind-windows-amd64.exe status quark --json
 .\panfind-windows-amd64.exe quark:/ -type f -iname "*.pdf" --json
 .\panfind-windows-amd64.exe schema --json
 ```

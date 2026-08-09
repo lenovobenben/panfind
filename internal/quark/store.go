@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const storeSchemaVersion = 3
+const storeSchemaVersion = 4
 
 var errUnsupportedStoreSchema = errors.New("unsupported Quark metadata store schema")
 
@@ -108,7 +108,18 @@ func (s *store) initialize(ctx context.Context) error {
 			return fmt.Errorf("create Quark crawl queue schema: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
+	if version < 4 {
+		if _, err := tx.ExecContext(ctx, `
+			ALTER TABLE sync_runs ADD COLUMN started_at TEXT;
+			ALTER TABLE sync_runs ADD COLUMN last_attempt_at TEXT;
+			ALTER TABLE sync_runs ADD COLUMN last_progress_at TEXT;
+			ALTER TABLE sync_runs ADD COLUMN completed_at TEXT;
+			ALTER TABLE sync_runs ADD COLUMN last_error TEXT;
+		`); err != nil {
+			return fmt.Errorf("add Quark sync status schema: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 4"); err != nil {
 		return fmt.Errorf("write Quark metadata store schema version: %w", err)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/lenovobenben/panfind/internal/namespace"
 )
@@ -120,10 +121,6 @@ func (runner *refreshRunner) run(ctx context.Context, observe func(Authorization
 		return nil, errors.New("Quark desktop authorization returned no session")
 	}
 	defer session.close()
-	client, err := session.directoryClient()
-	if err != nil {
-		return nil, fmt.Errorf("create authenticated Quark directory client: %w", err)
-	}
 
 	runID, exists, err := runner.store.stagingGeneration(ctx, accountID)
 	if err != nil {
@@ -135,11 +132,31 @@ func (runner *refreshRunner) run(ctx context.Context, observe func(Authorization
 			return nil, err
 		}
 	}
-	scanner, err := newScanner(runner.store, client, runner.pageSize)
-	if err != nil {
+	if err := runner.store.markGenerationAttempt(ctx, runID); err != nil {
 		return nil, err
 	}
-	return scanner.run(ctx, runID)
+	client, err := session.directoryClient()
+	if err != nil {
+		return nil, runner.recordFailure(ctx, runID, fmt.Errorf("create authenticated Quark directory client: %w", err))
+	}
+	scanner, err := newScanner(runner.store, client, runner.pageSize)
+	if err != nil {
+		return nil, runner.recordFailure(ctx, runID, err)
+	}
+	snapshot, err := scanner.run(ctx, runID)
+	if err != nil {
+		return nil, runner.recordFailure(ctx, runID, err)
+	}
+	return snapshot, nil
+}
+
+func (runner *refreshRunner) recordFailure(ctx context.Context, runID int64, refreshErr error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := runner.store.recordGenerationFailure(cleanupCtx, runID, refreshErr); err != nil {
+		return errors.Join(refreshErr, err)
+	}
+	return refreshErr
 }
 
 var (

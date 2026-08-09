@@ -79,6 +79,10 @@ type quarkRefreshAdapter interface {
 	Refresh(context.Context, func(quark.AuthorizationNotice)) (*namespace.Snapshot, error)
 }
 
+type quarkRefreshStatusAdapter interface {
+	RefreshStatus(context.Context, provider.Account) (quark.RefreshStatus, error)
+}
+
 type refreshResult struct {
 	Provider    string `json:"provider"`
 	Account     string `json:"account"`

@@ -97,7 +97,7 @@ func TestOpenStoreRejectsNewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 4"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 5"); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -152,5 +152,69 @@ func TestOpenStoreMigratesStableIDSchema(t *testing.T) {
 	}
 	if _, err := store.beginGeneration(context.Background(), "account-1"); err != nil {
 		t.Fatalf("beginGeneration() after migration: %v", err)
+	}
+}
+
+func TestOpenStoreMigratesRefreshStatusSchema(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "metadata.db")
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE sync_runs(
+			run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id TEXT NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('staging', 'complete'))
+		);
+		INSERT INTO sync_runs(account_id, state) VALUES ('account-1', 'complete');
+		PRAGMA user_version = 3;
+	`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openStore(databasePath)
+	if err != nil {
+		t.Fatalf("openStore() migration error: %v", err)
+	}
+	defer store.close()
+	var version int
+	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read migrated schema version: %v", err)
+	}
+	if version != storeSchemaVersion {
+		t.Fatalf("migrated schema version = %d, want %d", version, storeSchemaVersion)
+	}
+	rows, err := store.db.Query("PRAGMA table_info(sync_runs)")
+	if err != nil {
+		t.Fatalf("read sync_runs columns: %v", err)
+	}
+	defer rows.Close()
+	wanted := map[string]bool{
+		"started_at": false, "last_attempt_at": false, "last_progress_at": false,
+		"completed_at": false, "last_error": false,
+	}
+	for rows.Next() {
+		var position, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&position, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("scan sync_runs column: %v", err)
+		}
+		if _, exists := wanted[name]; exists {
+			wanted[name] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate sync_runs columns: %v", err)
+	}
+	for name, found := range wanted {
+		if !found {
+			t.Errorf("migrated sync_runs is missing %s", name)
+		}
 	}
 }

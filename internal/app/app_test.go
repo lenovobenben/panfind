@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lenovobenben/panfind/internal/namespace"
 	"github.com/lenovobenben/panfind/internal/provider"
@@ -366,5 +367,94 @@ func TestRunRefreshRejectsUnsupportedProvider(t *testing.T) {
 	code := Run([]string{"refresh", "baidu"}, &stdout, &stderr)
 	if code != ExitUsage || !strings.Contains(stderr.String(), "expected 'quark") {
 		t.Fatalf("Run(refresh baidu) = %d, stderr %q", code, stderr.String())
+	}
+}
+
+type fakeQuarkStatusAdapter struct {
+	account        provider.Account
+	refreshStatus  quark.RefreshStatus
+	snapshot       *namespace.Snapshot
+	loadGeneration uint64
+	loadCalls      int
+}
+
+func (fake *fakeQuarkStatusAdapter) ID() namespace.ProviderID {
+	return quark.ProviderID
+}
+
+func (fake *fakeQuarkStatusAdapter) Capabilities() provider.Capabilities {
+	return provider.Capabilities{}
+}
+
+func (fake *fakeQuarkStatusAdapter) DiscoverAccounts(context.Context) ([]provider.Account, error) {
+	return []provider.Account{fake.account}, nil
+}
+
+func (fake *fakeQuarkStatusAdapter) LoadSnapshot(_ context.Context, _ provider.Account, generation uint64) (*namespace.Snapshot, error) {
+	fake.loadCalls++
+	fake.loadGeneration = generation
+	return fake.snapshot, nil
+}
+
+func (fake *fakeQuarkStatusAdapter) RefreshStatus(context.Context, provider.Account) (quark.RefreshStatus, error) {
+	return fake.refreshStatus, nil
+}
+
+func TestLoadAccountStatusesReportsFailedQuarkStagingWithoutSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	adapter := &fakeQuarkStatusAdapter{
+		account: provider.Account{Provider: quark.ProviderID, ID: "account-1"},
+		refreshStatus: quark.RefreshStatus{
+			State: quark.RefreshStateFailed, StagingGeneration: 3,
+			StartedAt: &now, LastError: "temporary failure", DirectoriesDiscovered: 4,
+			DirectoriesCompleted: 0, DirectoriesPending: 4, StagedNodes: 8,
+		},
+	}
+	statuses, err := loadAccountStatuses(context.Background(), adapter)
+	if err != nil {
+		t.Fatalf("loadAccountStatuses() error: %v", err)
+	}
+	if adapter.loadCalls != 0 {
+		t.Fatalf("LoadSnapshot() called %d times without a published generation", adapter.loadCalls)
+	}
+	if len(statuses) != 1 || statuses[0].RefreshState != "failed" || statuses[0].RefreshRun != 3 ||
+		statuses[0].Generation != 0 || statuses[0].LastError != "temporary failure" ||
+		statuses[0].DirectoriesDiscovered == nil || *statuses[0].DirectoriesDiscovered != 4 ||
+		statuses[0].StagedNodes == nil || *statuses[0].StagedNodes != 8 {
+		t.Fatalf("account statuses = %+v", statuses)
+	}
+	encoded, err := json.Marshal(statuses)
+	if err != nil {
+		t.Fatalf("marshal account statuses: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"directories_completed":0`) {
+		t.Fatalf("zero directory progress was omitted: %s", encoded)
+	}
+}
+
+func TestLoadAccountStatusesUsesPublishedQuarkGeneration(t *testing.T) {
+	root := namespace.NodeKey{Provider: quark.ProviderID, Account: "account-1", ID: 1}
+	file := namespace.NodeKey{Provider: root.Provider, Account: root.Account, ID: 2}
+	snapshot, err := namespace.NewSnapshot(7, root, []namespace.Node{
+		{Key: root, Name: "/", Kind: namespace.NodeKindDirectory},
+		{Key: file, Parent: root, Name: "document.pdf", Kind: namespace.NodeKindFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeQuarkStatusAdapter{
+		account:       provider.Account{Provider: quark.ProviderID, ID: "account-1"},
+		refreshStatus: quark.RefreshStatus{State: quark.RefreshStateReady, PublishedGeneration: 7},
+		snapshot:      snapshot,
+	}
+	statuses, err := loadAccountStatuses(context.Background(), adapter)
+	if err != nil {
+		t.Fatalf("loadAccountStatuses() error: %v", err)
+	}
+	if adapter.loadCalls != 1 || adapter.loadGeneration != 7 {
+		t.Fatalf("LoadSnapshot() calls = %d, generation = %d", adapter.loadCalls, adapter.loadGeneration)
+	}
+	if len(statuses) != 1 || statuses[0].Generation != 7 || statuses[0].Files != 1 || statuses[0].RefreshState != "ready" {
+		t.Fatalf("account statuses = %+v", statuses)
 	}
 }

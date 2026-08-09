@@ -51,10 +51,11 @@ func (s *store) beginGeneration(ctx context.Context, accountID namespace.Account
 	}
 	defer tx.Rollback()
 
+	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `
-		INSERT INTO sync_runs(account_id, state)
-		VALUES (?, 'staging')
-	`, accountID)
+		INSERT INTO sync_runs(account_id, state, started_at, last_attempt_at)
+		VALUES (?, 'staging', ?, ?)
+	`, accountID, formatTime(&now), formatTime(&now))
 	if err != nil {
 		return 0, fmt.Errorf("create Quark staging generation: %w", err)
 	}
@@ -105,11 +106,12 @@ func (s *store) publishGeneration(ctx context.Context, runID int64) (*namespace.
 		return nil, fmt.Errorf("validate Quark staging generation %d: %w", runID, err)
 	}
 
+	completedAt := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE sync_runs
-		SET state = 'complete'
+		SET state = 'complete', completed_at = ?, last_progress_at = ?, last_error = NULL
 		WHERE run_id = ?
-	`, runID); err != nil {
+	`, formatTime(&completedAt), formatTime(&completedAt), runID); err != nil {
 		return nil, fmt.Errorf("complete Quark generation %d: %w", runID, err)
 	}
 	if _, err := tx.ExecContext(ctx, `

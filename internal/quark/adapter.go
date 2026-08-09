@@ -70,7 +70,7 @@ func (adapter *Adapter) DiscoverAccounts(ctx context.Context) ([]provider.Accoun
 		return nil, err
 	}
 	defer store.close()
-	accountIDs, err := store.publishedAccounts(ctx)
+	accountIDs, err := store.knownAccounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -86,18 +86,33 @@ func (adapter *Adapter) DiscoverAccounts(ctx context.Context) ([]provider.Accoun
 	return accounts, nil
 }
 
+// RefreshStatus reports the last published snapshot and any recoverable scan
+// without contacting Quark.
+func (adapter *Adapter) RefreshStatus(ctx context.Context, account provider.Account) (RefreshStatus, error) {
+	if err := adapter.validateAccount(account); err != nil {
+		return RefreshStatus{}, err
+	}
+	info, err := os.Stat(adapter.databasePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return RefreshStatus{State: RefreshStateEmpty}, nil
+		}
+		return RefreshStatus{}, fmt.Errorf("inspect Quark metadata database: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return RefreshStatus{}, errors.New("Quark metadata database is not a regular file")
+	}
+	store, err := openStore(adapter.databasePath)
+	if err != nil {
+		return RefreshStatus{}, err
+	}
+	defer store.close()
+	return store.refreshStatus(ctx, account.ID)
+}
+
 func (adapter *Adapter) LoadSnapshot(ctx context.Context, account provider.Account, generation uint64) (*namespace.Snapshot, error) {
-	if adapter == nil || adapter.databasePath == "" {
-		return nil, errors.New("Quark adapter database path is empty")
-	}
-	if account.Provider != ProviderID {
-		return nil, fmt.Errorf("account provider %q does not match adapter %q", account.Provider, ProviderID)
-	}
-	if account.ID == "" {
-		return nil, errors.New("Quark account ID is empty")
-	}
-	if filepath.Clean(account.DatabasePath) != filepath.Clean(adapter.databasePath) {
-		return nil, errors.New("Quark account database path does not match adapter")
+	if err := adapter.validateAccount(account); err != nil {
+		return nil, err
 	}
 	info, err := os.Stat(adapter.databasePath)
 	if err != nil {
@@ -115,6 +130,22 @@ func (adapter *Adapter) LoadSnapshot(ctx context.Context, account provider.Accou
 	}
 	defer store.close()
 	return store.loadPublishedSnapshot(ctx, account.ID, generation)
+}
+
+func (adapter *Adapter) validateAccount(account provider.Account) error {
+	if adapter == nil || adapter.databasePath == "" {
+		return errors.New("Quark adapter database path is empty")
+	}
+	if account.Provider != ProviderID {
+		return fmt.Errorf("account provider %q does not match adapter %q", account.Provider, ProviderID)
+	}
+	if account.ID == "" {
+		return errors.New("Quark account ID is empty")
+	}
+	if filepath.Clean(account.DatabasePath) != filepath.Clean(adapter.databasePath) {
+		return errors.New("Quark account database path does not match adapter")
+	}
+	return nil
 }
 
 // Refresh authenticates through the running desktop client and replaces the
@@ -141,26 +172,30 @@ func (adapter *Adapter) Refresh(ctx context.Context, observe func(AuthorizationN
 	return runner.run(ctx, observe)
 }
 
-func (s *store) publishedAccounts(ctx context.Context) ([]namespace.AccountID, error) {
+func (s *store) knownAccounts(ctx context.Context) ([]namespace.AccountID, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT account_id
 		FROM published_generations
+		UNION
+		SELECT account_id
+		FROM sync_runs
+		WHERE state = 'staging'
 		ORDER BY account_id
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("read published Quark accounts: %w", err)
+		return nil, fmt.Errorf("read known Quark accounts: %w", err)
 	}
 	defer rows.Close()
 	accounts := make([]namespace.AccountID, 0)
 	for rows.Next() {
 		var accountID namespace.AccountID
 		if err := rows.Scan(&accountID); err != nil {
-			return nil, fmt.Errorf("scan published Quark account: %w", err)
+			return nil, fmt.Errorf("scan known Quark account: %w", err)
 		}
 		accounts = append(accounts, accountID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate published Quark accounts: %w", err)
+		return nil, fmt.Errorf("iterate known Quark accounts: %w", err)
 	}
 	return accounts, nil
 }

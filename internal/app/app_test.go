@@ -9,6 +9,7 @@ import (
 
 	"github.com/lenovobenben/panfind/internal/namespace"
 	"github.com/lenovobenben/panfind/internal/provider"
+	"github.com/lenovobenben/panfind/internal/quark"
 )
 
 func TestRunHelp(t *testing.T) {
@@ -93,6 +94,22 @@ func TestRunSchemaJSON(t *testing.T) {
 	}
 	if len(schema.ExitCodes) != 5 || schema.ExitCodes[1].Code != ExitNoMatches {
 		t.Fatalf("schema exit codes = %+v", schema.ExitCodes)
+	}
+}
+
+func TestRunCapabilitiesQuarkJSON(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"capabilities", "quark", "--json"}, &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("Run(capabilities quark) = %d, stderr=%q", code, stderr.String())
+	}
+	var capabilities provider.Capabilities
+	if err := json.Unmarshal(stdout.Bytes(), &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.Size || !capabilities.CreatedAt || !capabilities.StableID || capabilities.Hash {
+		t.Fatalf("Quark capabilities = %+v", capabilities)
 	}
 }
 
@@ -209,6 +226,37 @@ func TestParseQueryAccount(t *testing.T) {
 	}
 }
 
+func TestParseQuarkQuery(t *testing.T) {
+	request, err := parseQueryRequest([]string{"quark:/shows", "-type", "f", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.providerName != "quark" || request.pathPrefix != "quark:" || request.query.Root != "quark:/shows" {
+		t.Fatalf("parsed Quark request = %+v", request)
+	}
+}
+
+func TestExecuteQuarkQueryUsesQuarkPath(t *testing.T) {
+	root := namespace.NodeKey{Provider: quark.ProviderID, Account: "account-1", ID: 1}
+	file := namespace.NodeKey{Provider: root.Provider, Account: root.Account, ID: 2}
+	snapshot, err := namespace.NewSnapshot(3, root, []namespace.Node{
+		{Key: root, Name: "/", Kind: namespace.NodeKindDirectory},
+		{Key: file, Parent: root, Name: "document.pdf", Kind: namespace.NodeKindFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := parseQueryRequest([]string{"quark:/", "-type", "f"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	result := executeQuery(snapshot, request, 0, &stdout)
+	if result.err != nil || stdout.String() != "quark:/document.pdf\n" {
+		t.Fatalf("executeQuery() = %+v, output %q", result, stdout.String())
+	}
+}
+
 type fakeAccountDiscoverer struct {
 	accounts []provider.Account
 	err      error
@@ -224,11 +272,11 @@ func TestDiscoverQueryAccount(t *testing.T) {
 		{Provider: "baidu-local", ID: "second"},
 	}
 	discoverer := fakeAccountDiscoverer{accounts: accounts}
-	if _, err := discoverQueryAccount(context.Background(), discoverer, nil); err == nil || !strings.Contains(err.Error(), "use --account") {
+	if _, err := discoverQueryAccount(context.Background(), discoverer, nil, "baidu"); err == nil || !strings.Contains(err.Error(), "use --account") {
 		t.Fatalf("multiple account error = %v", err)
 	}
 	selected := namespace.AccountID("second")
-	account, err := discoverQueryAccount(context.Background(), discoverer, &selected)
+	account, err := discoverQueryAccount(context.Background(), discoverer, &selected, "baidu")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +284,7 @@ func TestDiscoverQueryAccount(t *testing.T) {
 		t.Fatalf("selected account = %q", account.ID)
 	}
 	missing := namespace.AccountID("missing")
-	if _, err := discoverQueryAccount(context.Background(), discoverer, &missing); err == nil || !strings.Contains(err.Error(), "was not found") {
+	if _, err := discoverQueryAccount(context.Background(), discoverer, &missing, "baidu"); err == nil || !strings.Contains(err.Error(), "was not found") {
 		t.Fatalf("missing account error = %v", err)
 	}
 }
@@ -244,7 +292,7 @@ func TestDiscoverQueryAccount(t *testing.T) {
 func TestWriteAccountsJSON(t *testing.T) {
 	accounts := []provider.Account{{Provider: "baidu-local", ID: "account-1", DisplayName: "Account One"}}
 	var stdout bytes.Buffer
-	if err := writeAccounts(&stdout, accounts, true); err != nil {
+	if err := writeAccounts(&stdout, accounts, true, "baidu"); err != nil {
 		t.Fatal(err)
 	}
 	var items []accountInfo
@@ -259,5 +307,64 @@ func TestWriteAccountsJSON(t *testing.T) {
 func TestExitCodeContract(t *testing.T) {
 	if ExitSuccess != 0 || ExitNoMatches != 1 || ExitUsage != 2 || ExitDataSource != 3 || ExitOutput != 4 {
 		t.Fatalf("exit code contract changed: %d %d %d %d %d", ExitSuccess, ExitNoMatches, ExitUsage, ExitDataSource, ExitOutput)
+	}
+}
+
+type fakeQuarkRefreshAdapter struct {
+	snapshot *namespace.Snapshot
+	err      error
+	notice   quark.AuthorizationNotice
+}
+
+func (fake *fakeQuarkRefreshAdapter) ID() namespace.ProviderID {
+	return quark.ProviderID
+}
+
+func (fake *fakeQuarkRefreshAdapter) Refresh(_ context.Context, observe func(quark.AuthorizationNotice)) (*namespace.Snapshot, error) {
+	if observe != nil {
+		observe(fake.notice)
+	}
+	return fake.snapshot, fake.err
+}
+
+func TestRunQuarkRefreshJSON(t *testing.T) {
+	root := namespace.NodeKey{Provider: quark.ProviderID, Account: "anonymous-account", ID: 1}
+	file := namespace.NodeKey{Provider: root.Provider, Account: root.Account, ID: 2}
+	snapshot, err := namespace.NewSnapshot(7, root, []namespace.Node{
+		{Key: root, Name: "/", Kind: namespace.NodeKindDirectory},
+		{Key: file, Parent: root, Name: "document.pdf", Kind: namespace.NodeKindFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeQuarkRefreshAdapter{
+		snapshot: snapshot,
+		notice:   quark.AuthorizationNotice{PromptOpened: true},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runQuarkRefresh(context.Background(), adapter, true, &stdout, &stderr)
+	if code != ExitSuccess {
+		t.Fatalf("runQuarkRefresh() = %d, stderr %q", code, stderr.String())
+	}
+	var result refreshResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Provider != string(quark.ProviderID) || result.Account != "anonymous-account" ||
+		result.Generation != 7 || result.Nodes != 1 || result.Files != 1 || result.Directories != 0 {
+		t.Fatalf("refresh result = %+v", result)
+	}
+	if !strings.Contains(stderr.String(), "confirm") {
+		t.Fatalf("refresh prompt = %q", stderr.String())
+	}
+}
+
+func TestRunRefreshRejectsUnsupportedProvider(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"refresh", "baidu"}, &stdout, &stderr)
+	if code != ExitUsage || !strings.Contains(stderr.String(), "expected 'quark") {
+		t.Fatalf("Run(refresh baidu) = %d, stderr %q", code, stderr.String())
 	}
 }

@@ -30,7 +30,7 @@ func TestLiveDesktopRefresh(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	snapshot, err := runner.run(ctx, func(notice authorizationNotice) {
+	snapshot, err := runner.run(ctx, func(notice AuthorizationNotice) {
 		t.Logf("Quark desktop confirmation requested (prompt_opened=%t)", notice.PromptOpened)
 	})
 	if err != nil {

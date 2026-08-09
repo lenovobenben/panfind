@@ -8,7 +8,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/lenovobenben/panfind/internal/baidu"
 	"github.com/lenovobenben/panfind/internal/namespace"
 	"github.com/lenovobenben/panfind/internal/output"
 	"github.com/lenovobenben/panfind/internal/provider"
@@ -51,8 +50,10 @@ func RunContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runQuery(ctx, args[1:], stdout, stderr)
 	case "watch":
 		return runWatch(ctx, args[1:], stdout, stderr)
+	case "refresh":
+		return runRefresh(ctx, args[1:], stdout, stderr)
 	default:
-		if strings.HasPrefix(args[0], "baidu:") {
+		if strings.HasPrefix(args[0], "baidu:") || strings.HasPrefix(args[0], "quark:") {
 			return runQuery(ctx, args, stdout, stderr)
 		}
 		fmt.Fprintf(stderr, "panfind: unsupported command or query %q\n", args[0])
@@ -75,14 +76,17 @@ type queryRequest struct {
 	jsonOutput   bool
 	printfFormat *string
 	accountID    *namespace.AccountID
+	providerName string
+	pathPrefix   string
 }
 
 func parseQueryRequest(args []string) (queryRequest, error) {
 	if len(args) == 0 {
 		return queryRequest{}, fmt.Errorf("missing query root")
 	}
-	if !strings.HasPrefix(args[0], "baidu:") {
-		return queryRequest{}, fmt.Errorf("unsupported root %q; expected baidu:/ or baidu:/path", args[0])
+	providerName, pathPrefix, err := queryProvider(args[0])
+	if err != nil {
+		return queryRequest{}, err
 	}
 
 	jsonOutput := false
@@ -114,7 +118,10 @@ func parseQueryRequest(args []string) (queryRequest, error) {
 	if err != nil {
 		return queryRequest{}, err
 	}
-	return queryRequest{query: parsed, jsonOutput: jsonOutput, printfFormat: printfFormat, accountID: accountID}, nil
+	return queryRequest{
+		query: parsed, jsonOutput: jsonOutput, printfFormat: printfFormat,
+		accountID: accountID, providerName: providerName, pathPrefix: pathPrefix,
+	}, nil
 }
 
 func runQuery(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -123,12 +130,12 @@ func runQuery(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "panfind query: %v\n", err)
 		return ExitUsage
 	}
-	adapter, err := baidu.New()
+	adapter, err := newProviderAdapter(request.providerName)
 	if err != nil {
 		fmt.Fprintf(stderr, "panfind query: %v\n", err)
 		return ExitDataSource
 	}
-	account, err := discoverQueryAccount(ctx, adapter, request.accountID)
+	account, err := discoverQueryAccount(ctx, adapter, request.accountID, request.providerName)
 	if err != nil {
 		fmt.Fprintf(stderr, "panfind query: %v\n", err)
 		return ExitDataSource
@@ -165,7 +172,7 @@ func executeQuery(snapshot *namespace.Snapshot, request queryRequest, generation
 	var formatErr error
 	err := query.ExecuteEach(snapshot, request.query, func(result query.Result) error {
 		matched++
-		cloudPath := "baidu:" + result.Path
+		cloudPath := request.pathPrefix + result.Path
 		if request.printfFormat != nil {
 			formatted, err := output.Printf(*request.printfFormat, cloudPath, result.Node)
 			if err != nil {
@@ -220,13 +227,13 @@ type accountDiscoverer interface {
 	DiscoverAccounts(context.Context) ([]provider.Account, error)
 }
 
-func discoverQueryAccount(ctx context.Context, adapter accountDiscoverer, requested *namespace.AccountID) (provider.Account, error) {
+func discoverQueryAccount(ctx context.Context, adapter accountDiscoverer, requested *namespace.AccountID, providerName string) (provider.Account, error) {
 	accounts, err := adapter.DiscoverAccounts(ctx)
 	if err != nil {
 		return provider.Account{}, err
 	}
 	if len(accounts) == 0 {
-		return provider.Account{}, fmt.Errorf("no Baidu Netdisk account database found")
+		return provider.Account{}, fmt.Errorf("no %s account snapshot found", providerDisplayName(providerName))
 	}
 	if requested != nil {
 		for _, account := range accounts {
@@ -234,7 +241,7 @@ func discoverQueryAccount(ctx context.Context, adapter accountDiscoverer, reques
 				return account, nil
 			}
 		}
-		return provider.Account{}, fmt.Errorf("Baidu account %q was not found", *requested)
+		return provider.Account{}, fmt.Errorf("%s account %q was not found", providerDisplayName(providerName), *requested)
 	}
 	if len(accounts) > 1 {
 		return provider.Account{}, fmt.Errorf("multiple accounts found; use --account <id> to select one")
@@ -248,12 +255,12 @@ func runWatch(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "panfind watch: %v\n", err)
 		return ExitUsage
 	}
-	adapter, err := baidu.New()
+	adapter, err := newProviderAdapter(request.providerName)
 	if err != nil {
 		fmt.Fprintf(stderr, "panfind watch: %v\n", err)
 		return ExitDataSource
 	}
-	account, err := discoverQueryAccount(ctx, adapter, request.accountID)
+	account, err := discoverQueryAccount(ctx, adapter, request.accountID, request.providerName)
 	if err != nil {
 		fmt.Fprintf(stderr, "panfind watch: %v\n", err)
 		return ExitDataSource
@@ -317,16 +324,21 @@ Usage:
   panfind <root> [expression]   search cloud-drive metadata
   panfind query <root> [expression] explicit machine-friendly query form
   panfind watch <root> [expression] rerun a query after metadata changes
-  panfind accounts [--json]    list discovered Baidu accounts
+  panfind refresh quark [--json] refresh the Quark snapshot through the desktop client
+  panfind accounts [baidu|quark] [--json] list discovered provider accounts
   panfind explain <root> [expression] [--json] show parsed query AST
   panfind schema [--json]      show the supported query language
-  panfind status [--json]      discover accounts and load snapshot status
-  panfind capabilities [--json] show provider capabilities
+  panfind status [baidu|quark] [--json] load provider snapshot status
+  panfind capabilities [baidu|quark] [--json] show provider capabilities
   panfind version              show version
   panfind help                 show this help
 
 Account selection:
   Put --account ID immediately after <root>; a single discovered account is selected automatically.
+
+Roots:
+  baidu:/path reads the Baidu desktop metadata database.
+  quark:/path reads the last successfully published Quark snapshot.
 
 Supported expressions:
   -type f|d   -name PATTERN   -iname PATTERN   -size N[cwbkMG]
@@ -343,12 +355,12 @@ type accountInfo struct {
 }
 
 func runAccounts(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	jsonOutput, err := optionalJSON(args)
+	providerName, jsonOutput, err := parseProviderCommandArgs(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "panfind accounts: %v\n", err)
 		return ExitUsage
 	}
-	adapter, err := baidu.New()
+	adapter, err := newProviderAdapter(providerName)
 	if err != nil {
 		fmt.Fprintf(stderr, "panfind accounts: %v\n", err)
 		return ExitDataSource
@@ -358,14 +370,14 @@ func runAccounts(ctx context.Context, args []string, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "panfind accounts: %v\n", err)
 		return ExitDataSource
 	}
-	if err := writeAccounts(stdout, accounts, jsonOutput); err != nil {
+	if err := writeAccounts(stdout, accounts, jsonOutput, providerName); err != nil {
 		fmt.Fprintf(stderr, "panfind accounts: %v\n", err)
 		return ExitOutput
 	}
 	return ExitSuccess
 }
 
-func writeAccounts(stdout io.Writer, accounts []provider.Account, jsonOutput bool) error {
+func writeAccounts(stdout io.Writer, accounts []provider.Account, jsonOutput bool, providerName string) error {
 	items := make([]accountInfo, 0, len(accounts))
 	for _, account := range accounts {
 		items = append(items, accountInfo{
@@ -378,7 +390,7 @@ func writeAccounts(stdout io.Writer, accounts []provider.Account, jsonOutput boo
 		return json.NewEncoder(stdout).Encode(items)
 	}
 	if len(items) == 0 {
-		_, err := fmt.Fprintln(stdout, "no Baidu Netdisk account database found")
+		_, err := fmt.Fprintf(stdout, "no %s account snapshot found\n", providerDisplayName(providerName))
 		return err
 	}
 	for _, item := range items {
@@ -447,8 +459,8 @@ func runExplain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "panfind explain: missing query root")
 		return ExitUsage
 	}
-	if !strings.HasPrefix(filtered[0], "baidu:") {
-		fmt.Fprintf(stderr, "panfind explain: unsupported root %q\n", filtered[0])
+	if _, _, err := queryProvider(filtered[0]); err != nil {
+		fmt.Fprintf(stderr, "panfind explain: %v\n", err)
 		return ExitUsage
 	}
 
@@ -493,18 +505,19 @@ func optionalJSON(args []string) (bool, error) {
 }
 
 func runCapabilities(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 1 || len(args) == 1 && args[0] != "--json" {
-		fmt.Fprintln(stderr, "panfind capabilities: only --json is supported")
+	providerName, jsonOutput, err := parseProviderCommandArgs(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "panfind capabilities: %v\n", err)
 		return ExitUsage
 	}
 
-	adapter, err := baidu.New()
+	adapter, err := newProviderAdapter(providerName)
 	if err != nil {
 		fmt.Fprintf(stderr, "panfind capabilities: %v\n", err)
 		return ExitDataSource
 	}
 	capabilities := adapter.Capabilities()
-	if len(args) == 1 {
+	if jsonOutput {
 		if err := json.NewEncoder(stdout).Encode(capabilities); err != nil {
 			fmt.Fprintf(stderr, "panfind capabilities: %v\n", err)
 			return ExitOutput
@@ -528,12 +541,13 @@ type accountStatus struct {
 }
 
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) > 1 || len(args) == 1 && args[0] != "--json" {
-		fmt.Fprintln(stderr, "panfind status: only --json is supported")
+	providerName, jsonOutput, err := parseProviderCommandArgs(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "panfind status: %v\n", err)
 		return ExitUsage
 	}
 
-	adapter, err := baidu.New()
+	adapter, err := newProviderAdapter(providerName)
 	if err != nil {
 		fmt.Fprintf(stderr, "panfind status: %v\n", err)
 		return ExitDataSource
@@ -562,7 +576,7 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		})
 	}
 
-	if len(args) == 1 {
+	if jsonOutput {
 		if err := json.NewEncoder(stdout).Encode(statuses); err != nil {
 			fmt.Fprintf(stderr, "panfind status: %v\n", err)
 			return ExitOutput
@@ -570,7 +584,7 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return ExitSuccess
 	}
 	if len(statuses) == 0 {
-		fmt.Fprintln(stdout, "no Baidu Netdisk account database found")
+		fmt.Fprintf(stdout, "no %s account snapshot found\n", providerDisplayName(providerName))
 		return ExitSuccess
 	}
 	for _, status := range statuses {

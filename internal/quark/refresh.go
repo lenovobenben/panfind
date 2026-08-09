@@ -9,7 +9,7 @@ import (
 	"github.com/lenovobenben/panfind/internal/namespace"
 )
 
-type authorizationNotice struct {
+type AuthorizationNotice struct {
 	AccountID    namespace.AccountID
 	PromptOpened bool
 }
@@ -96,7 +96,7 @@ func newRefreshRunner(store *store, authorization authorizationProvider, pageSiz
 
 // run obtains a one-scan desktop session, resumes the current account's
 // staging generation when present, and closes the session on every exit path.
-func (runner *refreshRunner) run(ctx context.Context, observe func(authorizationNotice)) (*namespace.Snapshot, error) {
+func (runner *refreshRunner) run(ctx context.Context, observe func(AuthorizationNotice)) (*namespace.Snapshot, error) {
 	authorization, err := runner.authorization.begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin Quark desktop authorization: %w", err)
@@ -109,7 +109,7 @@ func (runner *refreshRunner) run(ctx context.Context, observe func(authorization
 		return nil, errors.New("Quark desktop authorization has an empty account ID")
 	}
 	if observe != nil {
-		observe(authorizationNotice{AccountID: accountID, PromptOpened: authorization.promptIsOpen()})
+		observe(AuthorizationNotice{AccountID: accountID, PromptOpened: authorization.promptIsOpen()})
 	}
 
 	session, err := authorization.wait(ctx)

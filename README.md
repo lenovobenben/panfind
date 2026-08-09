@@ -4,7 +4,7 @@
 
 PanFind 把网盘和其他存储中的文件元数据映射成统一、快速、可组合的 POSIX 风格命名空间。AI Agent 可以把它当作探索用户文件世界的基础设施：先获得完整文件树、路径、大小、时间和哈希等线索，再结合互联网知识、临时脚本、下载和内容分析工具，尝试完成用户提出的任意搜索目标。
 
-当前 `v0.1.0` 是百度网盘 Windows 客户端的只读 MVP。它直接读取官方客户端已经保存在本机的 `filecache.db`，不登录百度账号、不全量调用远端 API，也不执行上传、删除、移动或重命名。
+当前版本已接入两种相互独立的只读 Provider：百度直接读取 Windows 客户端保存在本机的 `filecache.db`；夸克通过正在运行且已登录的桌面客户端临时授权，按需生成持久化的完整远端元数据快照。两者都不执行上传、删除、移动或重命名。
 
 ## 为什么需要 PanFind
 
@@ -14,7 +14,7 @@ PanFind 把这些问题收敛到一个稳定中间层：
 
 ```text
 百度本地数据库 ─┐
-夸克本地数据   ─┤
+夸克远端快照   ─┤
 其他网盘 API  ─┼─> Provider Adapter ─> POSIX 命名空间 ─> AI Agent
 NAS / 对象存储 ─┤                                      ├> CLI / 脚本
 本地文件系统   ─┘                                      └> 整理与分析工具
@@ -124,6 +124,10 @@ Skill 的 Windows 脚本负责安全调用 PanFind、解析 JSON Lines、汇总�
 - 支持前台 `watch`，数据库变化后约一秒内构建并原子发布新快照；
 - 刷新失败时继续保留上一代完整快照并自动重试；
 - 提供可被 Codex 发现的仓库级自然语言搜索 Skill。
+- 通过夸克桌面客户端本机桥接建立一次刷新专用的纯内存会话；
+- 递归扫描夸克远端文件树，以检查点恢复和原子发布方式维护本地快照；
+- 支持 `refresh quark`、`quark:/` 查询以及夸克账号、状态和能力输出；
+- 百度和夸克只在 Provider Adapter 输出统一 Snapshot 时汇合，认证与持久化实现互不依赖。
 
 ## 安装和运行
 
@@ -143,6 +147,9 @@ go build -trimpath -o bin/panfind.exe ./cmd/panfind
 .\panfind-windows-amd64.exe status
 .\panfind-windows-amd64.exe baidu:/ -type f -size +1G
 .\panfind-windows-amd64.exe baidu:/ -type f -iname "*.pdf" --json
+.\panfind-windows-amd64.exe refresh quark
+.\panfind-windows-amd64.exe status quark
+.\panfind-windows-amd64.exe quark:/ -type f -iname "*.pdf" --json
 .\panfind-windows-amd64.exe schema --json
 ```
 
@@ -176,18 +183,21 @@ PanFind 的目标不是只支持百度网盘，也不是永远停留在一条 CL
 
 PanFind 将文件名、路径、大小、哈希和时间视为敏感数据。当前版本：
 
-- 只读取官方客户端的本地 SQLite 数据库；
+- 百度 Provider 只读取官方客户端的本地 SQLite 数据库；
 - 使用 `mode=ro`、`query_only` 和只读事务；
 - 不修改官方数据库、客户端配置或用户网盘内容；
 - 不要求 BDUSS、Cookie、账号密码或开发者密钥；
 - 不上传元数据，也不包含遥测；
 - 遇到不支持的数据库结构时明确失败，不返回貌似正确的结果。
+- 夸克刷新不读取桌面客户端 Cookie 数据库，临时凭据和 Cookie 不写入磁盘或日志；
+- 夸克实现不依赖任何夸克 Skill、开放平台 CLI、其配置文件或其 OAuth 登录态。
 
 官方客户端关闭后，本地缓存可能不包含其他设备刚产生的云端变化。`filecache.db` 也是百度客户端的内部实现，未来版本可能改变路径或结构。
 
 ## 当前限制
 
-- 当前仅支持百度网盘 Windows 客户端的本地元数据；
+- 当前正式运行环境仍以 Windows 10/11 为主；夸克刷新要求桌面客户端正在运行且已经登录；
+- 夸克快照是用户主动刷新的非实时索引，其他客户端产生的变化不会自动出现；
 - PanFind 核心不上传、下载、删除、移动、重命名或搜索文件内容；
 - 不提供可靠的创建时间或加入网盘时间；
 - 网页目录链接依赖百度未公开的前端路由，只作为定位便利；

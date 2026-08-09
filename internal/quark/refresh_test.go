@@ -76,8 +76,8 @@ func TestRefreshRunnerAuthenticatesScansAndClosesSession(t *testing.T) {
 		t.Fatalf("newRefreshRunner() error: %v", err)
 	}
 
-	var notice authorizationNotice
-	snapshot, err := runner.run(ctx, func(value authorizationNotice) {
+	var notice AuthorizationNotice
+	snapshot, err := runner.run(ctx, func(value AuthorizationNotice) {
 		notice = value
 	})
 	if err != nil {

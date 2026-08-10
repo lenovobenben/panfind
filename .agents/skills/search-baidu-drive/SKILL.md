@@ -19,7 +19,15 @@ Treat the user's request as an investigation goal, not as a command to translate
 
 ## Use PanFind
 
-Prefer the bundled Windows script for ordinary metadata queries because it handles argument quoting, JSONL parsing, aggregate size, bounded display, and location links:
+Use the helper for the current platform. Release executable names are part of the Skill contract:
+
+- Windows amd64: `panfind-windows-amd64.exe`;
+- macOS Intel: `panfind-macos-amd64`;
+- macOS Apple Silicon: `panfind-macos-arm64`.
+
+The helpers search the repository root and `dist/` for the matching name, then fall back to a locally built `panfind` or `panfind.exe` and finally `PATH`. Do not guess a different release name.
+
+On Windows, prefer `search.ps1` for ordinary metadata queries because it handles argument quoting, JSONL parsing, aggregate size, bounded display, and location links:
 
 ```powershell
 & '.\.agents\skills\search-baidu-drive\scripts\search.ps1' `
@@ -30,13 +38,23 @@ Prefer the bundled Windows script for ordinary metadata queries because it handl
   -Limit 20
 ```
 
-The script emits one JSON object with `total`, `matched_size_bytes`, `matched_size_human`, `returned`, `truncated`, `query`, and `results`. `matched_size_bytes` covers the entire match set even when `results` is truncated. Calculate from byte values, not formatted strings.
+On macOS, invoke PanFind through the architecture-aware launcher and consume its JSON Lines output. The launcher does not aggregate or truncate results, so use bounded queries and calculate summaries from the complete JSONL stream when needed:
+
+```sh
+./.agents/skills/search-baidu-drive/scripts/panfind.sh \
+  query 'baidu:/' -type f \( -iname '*.mkv' -o -iname '*.mp4' \) \
+  -size +800M -size -2G --json
+```
+
+Set `PANFIND_PATH` for the macOS launcher, or `-PanFindPath` for the Windows helper, only when normal executable discovery fails.
+
+The Windows helper emits one JSON object with `total`, `matched_size_bytes`, `matched_size_human`, `returned`, `truncated`, `query`, and `results`. `matched_size_bytes` covers the entire match set even when `results` is truncated. Calculate from byte values, not formatted strings. The macOS launcher preserves PanFind's native JSON Lines output instead.
 
 Each returned result preserves the provider hash as `hash` when available. Treat a missing `hash` as unavailable metadata, not as an empty or matching hash.
 
 Use direct PanFind commands when the helper cannot express a necessary supported query. Inspect `capabilities --json`, `schema --json`, and `explain ... --json` instead of guessing field availability or query syntax.
 
-## Script parameters
+## Windows helper parameters
 
 - Set the search root with `-Root 'baidu:/path'`.
 - Select `-Kind file|directory|any`.

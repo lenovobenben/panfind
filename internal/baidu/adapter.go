@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 
 	"github.com/lenovobenben/panfind/internal/namespace"
@@ -18,13 +19,28 @@ type Adapter struct {
 	usersDir string
 }
 
-// New creates an adapter for the current Windows user's Baidu Netdisk cache.
+// New creates an adapter for the current user's Baidu Netdisk desktop cache.
 func New() (*Adapter, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("locate user config directory: %w", err)
 	}
-	return newAt(filepath.Join(configDir, "baidu", "BaiduNetdisk", "module", "BrowserEngine", "users")), nil
+	usersDir, err := defaultUsersDir(configDir, runtime.GOOS)
+	if err != nil {
+		return nil, err
+	}
+	return newAt(usersDir), nil
+}
+
+func defaultUsersDir(configDir, goos string) (string, error) {
+	switch goos {
+	case "windows":
+		return filepath.Join(configDir, "baidu", "BaiduNetdisk", "module", "BrowserEngine", "users"), nil
+	case "darwin":
+		return filepath.Join(configDir, "com.baidu.BaiduNetdisk-mac"), nil
+	default:
+		return "", fmt.Errorf("Baidu Netdisk desktop cache discovery is unsupported on %s", goos)
+	}
 }
 
 func newAt(usersDir string) *Adapter {

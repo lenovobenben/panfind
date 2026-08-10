@@ -1,6 +1,6 @@
 # PanFind（盘寻）
 
-PanFind 是一个面向百度网盘 Windows 客户端本地元数据的只读搜索工具。它把本地文件树组织成类似 POSIX 的路径命名空间，让命令行、脚本和 AI Agent 能用接近 GNU `find` 的方式查找百度网盘文件。
+PanFind 是一个面向百度网盘 Windows 和 macOS 客户端本地元数据的只读搜索工具。它把本地文件树组织成类似 POSIX 的路径命名空间，让命令行、脚本和 AI Agent 能用接近 GNU `find` 的方式查找百度网盘文件。
 
 它不登录百度网盘网页，不要求账号密码、Cookie 或开发者密钥，也不会上传、移动、重命名或删除网盘文件。
 
@@ -48,7 +48,7 @@ PanFind 负责提供只读元数据命名空间，不限制 Agent 如何理解�
 
 PanFind 将文件名、路径、大小、哈希和时间视为敏感数据。百度网盘数据路径遵守以下边界：
 
-- 只读取官方 Windows 客户端维护的本地 SQLite 数据库；
+- 只读取官方 Windows 或 macOS 客户端维护的本地 SQLite 数据库；
 - 使用 SQLite `mode=ro`、`query_only` 和只读事务；
 - 不修改官方数据库、客户端配置或网盘内容；
 - 不要求 BDUSS、Cookie、账号密码或开发者密钥；
@@ -61,7 +61,7 @@ PanFind 将文件名、路径、大小、哈希和时间视为敏感数据。百
 
 ## 当前已经实现
 
-- 自动发现百度网盘 Windows 客户端的本地账号数据库；
+- 自动发现百度网盘 Windows 和 macOS 客户端的本地账号数据库；
 - 单账号自动选择，多账号显式选择；
 - 通过只读 SQLite 事务加载一致的完整快照；
 - 路径查找、目录遍历、大小、修改时间、哈希和稳定节点标识；
@@ -76,49 +76,53 @@ PanFind 将文件名、路径、大小、哈希和时间视为敏感数据。百
 
 运行环境：
 
-- Windows 10/11；
-- 已安装并使用过百度网盘 Windows 客户端。
+- Windows 10/11（amd64），或 macOS（Intel amd64 / Apple Silicon arm64）；
+- 已安装并使用过对应平台的百度网盘桌面客户端。
 
 从源码构建需要 Go 1.24 或更高版本：
 
-```powershell
+```text
 git clone git@github.com:lenovobenben/panfind.git
 cd panfind
 go test ./...
-go build -trimpath -o bin/panfind.exe ./cmd/panfind
+go build -trimpath ./cmd/panfind
 ```
 
-如果选择使用预编译文件，请同时核对发布页提供的 SHA-256 校验值。对隐私敏感的使用场景，仍建议自行审计和构建。
+GitHub Release 提供 `panfind-windows-amd64.exe`、`panfind-macos-amd64.tar.gz` 和 `panfind-macos-arm64.tar.gz`。macOS 压缩包内保留对应架构的可执行文件名；请选择与 `uname -m` 对应的版本，`x86_64` 使用 `panfind-macos-amd64`，`arm64` 使用 `panfind-macos-arm64`。仓库级 Skill 会自动查找这些名称。
+
+如果选择使用预编译文件，请同时核对发布页提供的 SHA-256 校验值。macOS 预编译文件目前没有 Apple 代码签名和公证；对隐私敏感或受 Gatekeeper 限制的使用场景，建议审查源码后自行构建。
 
 ## 基本用法
 
-```powershell
+以下示例假设可执行文件已经位于 `PATH`；也可以在 Windows 使用 `.\panfind-windows-amd64.exe`，在 macOS 使用对应架构的 `./panfind-macos-*`：
+
+```sh
 # 查看账号和本地快照状态
-.\panfind.exe accounts --json
-.\panfind.exe status --json
+panfind accounts --json
+panfind status --json
 
 # 查找大于 1 GiB 的文件
-.\panfind.exe baidu:/ -type f -size +1G
+panfind baidu:/ -type f -size +1G
 
 # 不区分大小写查找 PDF
-.\panfind.exe baidu:/ -type f -iname "*.pdf"
+panfind baidu:/ -type f -iname "*.pdf"
 
 # 输出 JSON Lines
-.\panfind.exe baidu:/资料 -type f -newermt 2025-01-01 --json
+panfind baidu:/资料 -type f -newermt 2025-01-01 --json
 
 # 自定义输出
-.\panfind.exe baidu:/ -type f -iname "*.mkv" -printf "%s %p\n"
+panfind baidu:/ -type f -iname "*.mkv" -printf "%s %p\n"
 
 # 查看查询解释和能力
-.\panfind.exe explain baidu:/ -type f -size +1G --json
-.\panfind.exe capabilities --json
-.\panfind.exe schema --json
+panfind explain baidu:/ -type f -size +1G --json
+panfind capabilities --json
+panfind schema --json
 ```
 
 完整参数以程序自身输出为准：
 
-```powershell
-.\panfind.exe help
+```sh
+panfind help
 ```
 
 ## 推荐用法：交给 AI Agent
@@ -140,7 +144,7 @@ Agent 可以多轮调用 PanFind，逐步扩大或缩小范围，并将文件路
 
 ## 当前限制
 
-- 正式运行环境以 Windows 10/11 为主；
+- 正式运行环境为 Windows amd64、macOS amd64 和 macOS arm64；
 - 依赖百度网盘客户端已经生成的本地数据库；
 - 本地缓存可能暂时不包含其他设备刚产生的变化；
 - `filecache.db` 属于客户端内部实现，未来版本可能改变路径或结构；
@@ -151,12 +155,12 @@ Agent 可以多轮调用 PanFind，逐步扩大或缩小范围，并将文件路
 
 ## 开发与验证
 
-```powershell
+```text
 go test ./...
 go vet ./...
 ```
 
-项目已经使用真实的约 1.8 万节点本地缓存进行只读验证，并包含 10 万和 100 万节点合成基准。SQLite 集成测试覆盖 WAL 写入、增删改移、无效数据、排他锁、失败保留和恢复刷新；GNU `find` 差分测试用于固定已经承诺的查询语义。
+项目已经使用 Windows 和 macOS 客户端的真实本地缓存进行只读验证，并包含 10 万和 100 万节点合成基准。CI 在 Windows amd64、macOS amd64 和 macOS arm64 原生 runner 上执行测试、静态检查、构建和启动检查。SQLite 集成测试覆盖 WAL 写入、增删改移、无效数据、排他锁、失败保留和恢复刷新；GNU `find` 差分测试用于固定已经承诺的查询语义。
 
 更多背景与实现记录：
 

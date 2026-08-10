@@ -56,12 +56,32 @@ function Resolve-PanFindExecutable {
         return $resolvedExplicit
     }
 
-    $candidates = @(
-        (Join-Path $RepositoryRoot 'panfind-windows-amd64.exe'),
-        (Join-Path $RepositoryRoot 'panfind.exe'),
-        (Join-Path $RepositoryRoot 'bin\panfind.exe'),
-        (Join-Path $RepositoryRoot 'dist\panfind-windows-amd64.exe')
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $isMacOS = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::OSX
     )
+    if ($isMacOS) {
+        $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        if ($architecture -eq [Runtime.InteropServices.Architecture]::X64) {
+            $macAsset = 'panfind-macos-amd64'
+        }
+        elseif ($architecture -eq [Runtime.InteropServices.Architecture]::Arm64) {
+            $macAsset = 'panfind-macos-arm64'
+        }
+        else {
+            throw "Unsupported macOS architecture: $architecture"
+        }
+        $candidates.Add((Join-Path $RepositoryRoot $macAsset))
+        $candidates.Add((Join-Path $RepositoryRoot "dist/$macAsset"))
+        $candidates.Add((Join-Path $RepositoryRoot 'panfind'))
+        $candidates.Add((Join-Path $RepositoryRoot 'bin/panfind'))
+    }
+    else {
+        $candidates.Add((Join-Path $RepositoryRoot 'panfind-windows-amd64.exe'))
+        $candidates.Add((Join-Path $RepositoryRoot 'panfind.exe'))
+        $candidates.Add((Join-Path $RepositoryRoot 'bin\panfind.exe'))
+        $candidates.Add((Join-Path $RepositoryRoot 'dist\panfind-windows-amd64.exe'))
+    }
 
     foreach ($candidate in $candidates) {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
@@ -74,7 +94,7 @@ function Resolve-PanFindExecutable {
         return $command.Source
     }
 
-    throw 'PanFind was not found. Download panfind-windows-amd64.exe to the repository root or build panfind.exe first.'
+    throw 'PanFind was not found. Extract the matching release executable to the repository root or build PanFind first.'
 }
 
 function Assert-TextValues {

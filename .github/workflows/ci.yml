@@ -1,4 +1,4 @@
-name: Windows CI
+name: CI
 
 on:
   push:
@@ -12,9 +12,28 @@ permissions:
 
 jobs:
   test-and-build:
-    name: Test and build Windows executable
-    runs-on: windows-latest
-    timeout-minutes: 15
+    name: Test and build ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows amd64
+            runner: windows-latest
+            goos: windows
+            goarch: amd64
+            asset: panfind-windows-amd64.exe
+          - label: macOS amd64
+            runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            asset: panfind-macos-amd64
+          - label: macOS arm64
+            runner: macos-15
+            goos: darwin
+            goarch: arm64
+            asset: panfind-macos-arm64
 
     steps:
       - name: Check out repository
@@ -26,7 +45,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Require GNU findutils
+      - name: Verify runner platform
+        shell: pwsh
+        run: |
+          $actualOS = go env GOOS
+          $actualArch = go env GOARCH
+          if ($actualOS -ne '${{ matrix.goos }}' -or $actualArch -ne '${{ matrix.goarch }}') {
+            throw "Unexpected runner platform: $actualOS/$actualArch"
+          }
+
+      - name: Require GNU findutils on Windows
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $gnuFind = 'C:\Program Files\Git\usr\bin\find.exe'
@@ -36,22 +65,37 @@ jobs:
           & $gnuFind --version
           "PANFIND_GNU_FIND=$gnuFind" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Install GNU findutils on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install findutils
+          echo "PANFIND_GNU_FIND=$(brew --prefix findutils)/libexec/gnubin/find" >> "$GITHUB_ENV"
+
       - name: Run tests
         run: go test ./...
 
       - name: Run vet
         run: go vet ./...
 
-      - name: Build Windows executable
+      - name: Build executable
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          go build -trimpath -ldflags "-s -w" -o dist/panfind-windows-amd64.exe ./cmd/panfind
+          go build -trimpath -ldflags "-s -w" -o 'dist/${{ matrix.asset }}' ./cmd/panfind
 
-      - name: Upload Windows executable
+      - name: Smoke test executable
+        shell: pwsh
+        run: |
+          $reportedVersion = & './dist/${{ matrix.asset }}' version
+          if ($reportedVersion -ne 'panfind dev') {
+            throw "Built executable reported an unexpected version: $reportedVersion"
+          }
+
+      - name: Upload executable
         uses: actions/upload-artifact@v7
         with:
-          name: panfind-windows-amd64-${{ github.sha }}
-          path: dist/panfind-windows-amd64.exe
+          name: ${{ matrix.asset }}-${{ github.sha }}
+          path: dist/${{ matrix.asset }}
           if-no-files-found: error
           retention-days: 7

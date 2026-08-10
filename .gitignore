@@ -1,5 +1,8 @@
 /panfind.exe
 /panfind-windows-amd64.exe
+/panfind
+/panfind-macos-amd64
+/panfind-macos-arm64
 /SHA256SUMS.txt
 /dist/
 *.out

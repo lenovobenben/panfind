@@ -139,6 +139,9 @@ func inspectSchema(ctx context.Context, tx *sql.Tx) error {
 }
 
 func readFileMeta(ctx context.Context, tx *sql.Tx) ([]fileMetaRow, error) {
+	// The macOS client defines a unique index with its private
+	// baidunetdisksort collation. PanFind cannot register that implementation,
+	// so force a table scan instead of letting SQLite prepare the index.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT fid, parent_path, server_filename, file_size, md5,
 		       isdir, category, server_mtime
